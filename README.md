@@ -1,4 +1,4 @@
-# Mascarpone
+# <img src="docs/icon.png" width="48" align="center" alt=""> Mascarpone
 
 An mpd client for the desktop (raylib, Rust): the music library, the
 playlists (m3u files in a folder), the pictures, biographies and album
@@ -11,6 +11,14 @@ what plays through mpd-mpris, not through Mascarpone.
 
 A track without an album tag is filed under its folder, which stands in
 for an album, with the folder's name.
+
+![The albums, dealt in a random order, the player under them](docs/albums.webp)
+
+| | |
+|---|---|
+| ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
+| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, the song on marked](docs/queue.webp) |
+| ![The picker on everything](docs/picker.webp) | |
 
 ## Build
 
@@ -210,3 +218,4 @@ the queue as well.
   decoded on threads of their own, the last few hundred shown kept as
   textures; the artists' portraits.
 - `src/dirs.rs`: the XDG folders, the local time.
+- `docs/`: the icon (the launcher's) and the screens in this file.
