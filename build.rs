@@ -1,8 +1,10 @@
 //! raylib, built from `vendor/raylib` (6.2, trimmed: no audio, no
 //! models) with its own Makefile: GLFW for the desktop, Wayland and X11
-//! both. One change to its source, in a copy: the window's app id
+//! both. Two changes to its source, in a copy: the window's app id
 //! (Wayland) and class (X11), which sway's rules match and raylib has no
-//! call for.
+//! call for; and what GLFW's scroll keeps from Wayland: whether it came
+//! from a wheel's notches or a touchpad's pixels, and the touchpad's
+//! fingers lifted, for the scroll that goes on after them.
 //!
 //! Built once in `target/raylib`, for every profile and for `cargo
 //! check` alike, and again only when the vendored source or this file
@@ -83,18 +85,52 @@ fn walk(path: &Path, f: &mut impl FnMut(&Path)) {
     }
 }
 
-/// The app id set where raylib sets the window's hints.
+/// The app id set where raylib sets the window's hints; the scroll's
+/// source and its stops kept where GLFW reads Wayland's pointer.
 fn patch(src: &Path) {
-    let glfw = src.join("platforms").join("rcore_desktop_glfw.c");
-    let text = std::fs::read_to_string(&glfw).unwrap();
+    patch_app_id(src);
+    patch_scroll(src);
+}
+
+/// Replaces `from` once in a file, which must have it.
+fn replace(file: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(text.contains(from), "raylib changed: no {from} in {}", file.display());
+    std::fs::write(file, text.replacen(from, to, 1)).unwrap();
+}
+
+/// Two globals Mascarpone reads: `mascarpone_scroll_continuous`, set
+/// before GLFW hands a scroll on (0 for a wheel's notches, 1 for a
+/// touchpad's or a trackpoint's pixels); `mascarpone_scroll_stops`,
+/// counting the vertical scrolls the compositor said ended (the fingers
+/// lifted).
+fn patch_scroll(src: &Path) {
+    let wl = src.join("external").join("glfw").join("src").join("wl_window.c");
+    replace(&wl, "static void pointerHandleAxis(", "int mascarpone_scroll_continuous = 0;\nunsigned int mascarpone_scroll_stops = 0;\n\nstatic void pointerHandleAxis(");
+    replace(
+        &wl,
+        "        processPointerScroll(_glfw.wl.pending.discreteX, _glfw.wl.pending.discreteY);",
+        "    {\n        mascarpone_scroll_continuous = 0;\n        processPointerScroll(_glfw.wl.pending.discreteX, _glfw.wl.pending.discreteY);\n    }",
+    );
+    replace(
+        &wl,
+        "        processPointerScroll(_glfw.wl.pending.scrollX, _glfw.wl.pending.scrollY);",
+        "    {\n        mascarpone_scroll_continuous = 1;\n        processPointerScroll(_glfw.wl.pending.scrollX, _glfw.wl.pending.scrollY);\n    }",
+    );
+    replace(
+        &wl,
+        "                                  uint32_t axis)\n{\n}",
+        "                                  uint32_t axis)\n{\n    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)\n        mascarpone_scroll_stops++;\n}",
+    );
+}
+
+fn patch_app_id(src: &Path) {
     let hints = "glfwDefaultWindowHints();";
-    assert!(text.contains(hints), "raylib changed: no {hints} in rcore_desktop_glfw.c");
-    let text = text.replacen(
+    replace(
+        &src.join("platforms").join("rcore_desktop_glfw.c"),
         hints,
         &format!("{hints} glfwWindowHintString(GLFW_WAYLAND_APP_ID, \"{APP_ID}\"); glfwWindowHintString(GLFW_X11_CLASS_NAME, \"{APP_ID}\"); glfwWindowHintString(GLFW_X11_INSTANCE_NAME, \"{APP_ID}\");"),
-        1,
     );
-    std::fs::write(&glfw, text).unwrap();
 }
 
 fn make(src: &Path) {

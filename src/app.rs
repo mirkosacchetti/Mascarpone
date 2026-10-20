@@ -161,6 +161,9 @@ pub struct App {
     /// first.
     pub shown_at: Instant,
     pub pages: Vec<Page>,
+    /// The tab and its pages the queue was shown over (toggle queue),
+    /// until it is hidden again or another tab comes up.
+    under_queue: Option<(Tab, Vec<Page>)>,
     pub modal: Option<Modal>,
     pub actions: RefCell<Vec<Action>>,
     /// Asked by another launch to come up.
@@ -192,6 +195,7 @@ impl App {
             playlists: Grid::default(),
             shown_at: Instant::now(),
             pages: Vec::new(),
+            under_queue: None,
             modal: None,
             actions: RefCell::new(Vec::new()),
             present: false,
@@ -357,8 +361,26 @@ impl App {
         self.shown_at = Instant::now();
     }
 
+    /// The queue shown over the tab and the pages up, or, shown so,
+    /// hidden: the tab and its pages back as they were, not dealt again.
+    fn toggle_queue(&mut self) {
+        match self.under_queue.take() {
+            Some((tab, pages)) if self.tab == Tab::Queue => {
+                self.tab = tab;
+                self.pages = pages;
+            }
+            _ if self.tab == Tab::Queue => {}
+            _ => {
+                self.under_queue = Some((self.tab, std::mem::take(&mut self.pages)));
+                self.tab = Tab::Queue;
+                self.load_tab();
+            }
+        }
+    }
+
     /// The tab shown, back on the root page, its content built again.
     pub fn show_tab(&mut self, tab: Tab) {
+        self.under_queue = None;
         self.pages.clear();
         self.tab = tab;
         self.load_tab();
@@ -490,7 +512,7 @@ impl App {
                 self.run(shortcut);
                 true
             }
-            // Tab alone does nothing: the picker is the way around
+            // Tab, when no action has it (by default toggle queue): nothing
             None => matches!(input, Input::Key { code: rl::KEY_TAB, .. }),
         }
     }
@@ -513,6 +535,7 @@ impl App {
             S::Artists => self.act(Action::Tab(Tab::Artists)),
             S::Playlists => self.act(Action::Tab(Tab::Playlists)),
             S::Queue => self.act(Action::Tab(Tab::Queue)),
+            S::ToggleQueue => self.toggle_queue(),
             S::NextTab => self.act(Action::Tab(TABS[(self.tab.index() + 1) % TABS.len()])),
             S::PreviousTab => self.act(Action::Tab(TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()])),
             S::Back => self.act(Action::Back),

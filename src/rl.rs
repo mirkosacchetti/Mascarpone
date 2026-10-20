@@ -178,6 +178,10 @@ extern "C" {
     fn glfwSetCharCallback(window: *mut c_void, f: Option<CharFn>) -> Option<CharFn>;
     fn glfwSetMouseButtonCallback(window: *mut c_void, f: Option<ButtonFn>) -> Option<ButtonFn>;
     fn glfwSetScrollCallback(window: *mut c_void, f: Option<ScrollFn>) -> Option<ScrollFn>;
+
+    // GLFW's Wayland patched (build.rs): the scroll's source, its stops
+    static mascarpone_scroll_continuous: c_int;
+    static mascarpone_scroll_stops: c_uint;
 }
 
 type KeyFn = extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int);
@@ -194,7 +198,11 @@ pub enum Input {
     Char(char),
     Press(i32),
     Release(i32),
-    Scroll(f32, f32),
+    /// A scroll, down negative: a wheel's notches, or a touchpad's (or a
+    /// trackpoint's) pixels in tenths.
+    Scroll { y: f32, wheel: bool },
+    /// The touchpad's fingers lifted after a scroll.
+    ScrollStop,
 }
 
 struct Chain {
@@ -210,6 +218,8 @@ static ALIVE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static INPUT: RefCell<Vec<Input>> = const { RefCell::new(Vec::new()) };
+    /// The scroll stops seen so far.
+    static STOPS: Cell<c_uint> = const { Cell::new(0) };
 }
 
 fn push(input: Input) {
@@ -243,7 +253,9 @@ extern "C" fn on_button(window: *mut c_void, button: c_int, action: c_int, mods:
 }
 
 extern "C" fn on_scroll(window: *mut c_void, x: f64, y: f64) {
-    push(Input::Scroll(x as f32, y as f32));
+    // SAFETY: written by GLFW on this thread, before it calls back
+    let wheel = unsafe { mascarpone_scroll_continuous } == 0;
+    push(Input::Scroll { y: y as f32, wheel });
     if let Some(f) = unsafe { CHAIN.scroll } {
         f(window, x, y);
     }
@@ -388,6 +400,11 @@ pub fn input_waiting() -> bool {
 
 /// What came in since the last call.
 pub fn take_input() -> Vec<Input> {
+    // SAFETY: written by GLFW on this thread, in its event handling
+    let stops = unsafe { mascarpone_scroll_stops };
+    if STOPS.with(|s| s.replace(stops)) != stops {
+        push(Input::ScrollStop);
+    }
     INPUT.with(|i| std::mem::take(&mut *i.borrow_mut()))
 }
 

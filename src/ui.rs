@@ -9,6 +9,7 @@
 //! the round portraits), no animations.
 
 use std::rc::Rc;
+use std::time::Instant;
 
 use crate::rl::{self, Color, Input, Rectangle, Texture, Vector2};
 use crate::size::rem;
@@ -223,10 +224,18 @@ pub struct Ui {
     pub released: bool,
     pub down: bool,
     pub press_at: Vector2,
-    /// The wheel's scroll this frame, in pixels, down positive; taken by
-    /// the first view under the pointer.
-    pub wheel: f32,
-    wheel_steps: bool,
+    /// The scroll this frame, down positive, taken by the first view under
+    /// the pointer: a touchpad's (and the fling's) in pixels, a wheel's in
+    /// notches.
+    wheel: f32,
+    notches: f32,
+    /// The touchpad's last moves, for the fling's speed when the fingers
+    /// lift: when, and how far.
+    swipe: Vec<(Instant, f32)>,
+    /// The scroll going on after the fingers lifted: pixels a second,
+    /// slowing down, and when it was last moved.
+    fling: f32,
+    fling_at: Instant,
     /// The keys and characters of this frame.
     pub inputs: Vec<Input>,
     consumed: bool,
@@ -257,7 +266,10 @@ impl Ui {
             down: false,
             press_at: Vector2::default(),
             wheel: 0.0,
-            wheel_steps: false,
+            notches: 0.0,
+            swipe: Vec::new(),
+            fling: 0.0,
+            fling_at: Instant::now(),
             inputs: Vec::new(),
             consumed: false,
             blocked: false,
@@ -309,7 +321,7 @@ impl Ui {
         self.pressed = false;
         self.released = false;
         self.wheel = 0.0;
-        self.wheel_steps = false;
+        self.notches = 0.0;
         self.inputs.clear();
         self.consumed = false;
         self.blocked = false;
@@ -322,22 +334,31 @@ impl Ui {
                     self.press_at = self.mouse;
                 }
                 Input::Release(0) => self.released = true,
-                Input::Scroll(_, y) => {
-                    // a wheel's notch is a whole step; a touchpad's tenths
-                    // of its pixels
-                    if y.fract() == 0.0 {
-                        self.wheel_steps = true;
-                        self.wheel -= y;
+                Input::Scroll { y, wheel } => {
+                    self.fling = 0.0;
+                    if wheel {
+                        self.notches -= y;
                     } else {
-                        self.wheel -= y * 10.0 * scale;
+                        // tenths of the touchpad's points
+                        let px = -y * 10.0 * scale;
+                        self.wheel += px;
+                        self.swipe.push((Instant::now(), px));
                     }
                 }
+                Input::ScrollStop => self.fling = Ui::fling_speed(std::mem::take(&mut self.swipe), scale),
                 Input::Press(_) | Input::Release(_) => {}
-                i => self.inputs.push(i),
+                i => {
+                    self.fling = 0.0;
+                    self.inputs.push(i);
+                }
             }
         }
+        if self.pressed {
+            self.fling = 0.0;
+        }
+        self.fling_on(scale);
         self.down = unsafe { rl::IsMouseButtonDown(0) } || (self.pressed && !self.released);
-        self.moved || self.pressed || self.released || self.wheel != 0.0 || !self.inputs.is_empty()
+        self.moved || self.pressed || self.released || self.wheel != 0.0 || self.notches != 0.0 || !self.inputs.is_empty()
     }
 
     pub fn end_frame(&mut self) {
@@ -392,18 +413,53 @@ impl Ui {
         self.down && !self.blocked && r.contains(self.press_at)
     }
 
-    /// The wheel taken by a view under the pointer, `page` tall: a
-    /// wheel's notch moves by the page's height to the two thirds, a
-    /// touchpad's by its pixels.
+    /// The scroll taken by a view under the pointer, `page` tall, in
+    /// pixels: a wheel's notch moves by half again the page's height (in
+    /// points) to the two thirds, GTK's step, about a browser's hundred
+    /// points; a touchpad by its pixels.
     pub fn take_wheel(&mut self, r: R, page: f32) -> f32 {
-        if self.wheel == 0.0 || !self.hovered(r) {
+        if (self.wheel == 0.0 && self.notches == 0.0) || !self.hovered(r) {
             return 0.0;
         }
-        let w = std::mem::take(&mut self.wheel);
-        if self.wheel_steps {
-            w * page.max(1.0).powf(2.0 / 3.0)
+        let scale = crate::size::scale();
+        let step = 1.5 * (page / scale).max(1.0).powf(2.0 / 3.0) * scale;
+        std::mem::take(&mut self.notches) * step + std::mem::take(&mut self.wheel)
+    }
+
+    /// The fling's speed, in pixels a second, from the touchpad's moves
+    /// in the last tenth of a second before the fingers lifted; none
+    /// when they had slowed down to a crawl.
+    fn fling_speed(swipe: Vec<(Instant, f32)>, scale: f32) -> f32 {
+        let now = Instant::now();
+        let recent: Vec<&(Instant, f32)> = swipe.iter().filter(|(t, _)| now.duration_since(*t).as_secs_f32() < 0.1).collect();
+        let Some((first, _)) = recent.first() else { return 0.0 };
+        let span = now.duration_since(*first).as_secs_f32().max(1.0 / 60.0);
+        let speed = recent.iter().map(|(_, px)| px).sum::<f32>() / span;
+        if speed.abs() < 150.0 * scale {
+            0.0
         } else {
-            w
+            speed
+        }
+    }
+
+    /// The fling moved on since its last frame, slowing down by the time
+    /// it has run (it loses two thirds of its speed every third of a
+    /// second), until it is too slow to see.
+    fn fling_on(&mut self, scale: f32) {
+        const TAU: f32 = 0.33;
+        let now = Instant::now();
+        let dt = now.duration_since(self.fling_at).as_secs_f32().min(0.1);
+        self.fling_at = now;
+        if self.fling == 0.0 {
+            return;
+        }
+        let decay = (-dt / TAU).exp();
+        self.wheel += self.fling * TAU * (1.0 - decay);
+        self.fling *= decay;
+        if self.fling.abs() < 20.0 * scale {
+            self.fling = 0.0;
+        } else {
+            self.wake(0.0);
         }
     }
 

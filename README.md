@@ -67,6 +67,7 @@ KP_Subtract, KP_0. Every action and its default keys:
 | `search_all` | / | the picker on everything |
 | `search` | Ctrl+f | the picker on what is on screen |
 | `albums` `artists` `playlists` `queue` | 1 2 3 4 | the tabs |
+| `toggle_queue` | Tab | the queue shown, and hidden again: back where it was |
 | `next_tab` `previous_tab` | Ctrl+Tab, Ctrl+Shift+Tab | |
 | `back` | Escape | back a page |
 | `play_pause` | Space c | |
@@ -108,8 +109,9 @@ page one track is selected (k and l, or Down and Up, move it; a click
 plays from a row, or pauses the song on): Play and Enter play the list
 from it, or pause and resume when it is the song on; Add to queue
 appends. Space (or c) pauses and resumes anywhere, z, x and v go back,
-stop and go on; Tab alone does nothing. Ctrl+K lists every command with
-its keys: type to find one, Enter does it.
+stop and go on; Tab shows the queue and, again, hides it: back on the
+tab and the page it was asked from. Ctrl+K lists every command with its
+keys: type to find one, Enter does it.
 
 The player bar at the bottom has the song's title over the time (a
 click or a drag seeks), where the song is and its length at its ends;

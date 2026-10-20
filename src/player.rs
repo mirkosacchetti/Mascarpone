@@ -149,10 +149,10 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         Some((library, a, _)) => Some(library.albums[*a].artist.clone()),
         None => now.and_then(|n| n.song.as_ref()).and_then(|s| s.song.artists().first().cloned()),
     };
-    if now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.playlist().is_some() {
-        if ui.square_button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true) {
-            open_source(app);
-        }
+    if (now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.playlist().is_some())
+        && ui.square_button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true)
+    {
+        open_source(app);
     }
     if let Some(filed) = artist {
         if ui.square_button(R::new(x0, row, rh, rh), glyphs::ARTIST, 1.25, Look::Plain, true) {
