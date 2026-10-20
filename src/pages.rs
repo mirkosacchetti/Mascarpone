@@ -19,7 +19,7 @@ use crate::library::{self, Library, Playlist};
 use crate::master::Source;
 use crate::mpd::Command;
 use crate::picker::{Kind, Modal};
-use crate::rl::{self, Input, Vector2};
+use crate::rl::{self, Input};
 use crate::size::{self, rem};
 use crate::ui::{self, Look, Style, Ui, R};
 use crate::view;
@@ -69,7 +69,7 @@ pub struct Tracks {
     /// The subtitle a link to this artist's page.
     pub to_artist: Option<String>,
     pub facts: String,
-    /// A playlist's shuffle, under the facts.
+    /// A playlist's shuffle, after the buttons.
     pub shuffle: Option<(PathBuf, bool)>,
     /// A playlist's delete, at the bottom.
     pub delete: Option<(PathBuf, String)>,
@@ -80,6 +80,8 @@ pub struct Tracks {
     pub scroll: ui::Scroll,
     /// The selected row scrolled into view at the next frame.
     pub reveal: bool,
+    /// The first time in the middle of the view, not just at its edge.
+    pub centre: bool,
     /// The rows' top and bottom in the content, as last laid out.
     tops: Vec<(f32, f32)>,
 }
@@ -102,6 +104,7 @@ impl Tracks {
             selected: None,
             scroll: ui::Scroll::default(),
             reveal: true,
+            centre: true,
             tops: Vec::new(),
         };
         t.selected = t.rows.get(selected).filter(|r| r.start.is_some()).map(|_| selected);
@@ -146,7 +149,7 @@ impl Tracks {
     }
 
     /// The playlist: its facts and its entries, the ones the library
-    /// misses greyed out and not playable; shuffle under the facts,
+    /// misses greyed out and not playable; shuffle after the buttons,
     /// delete at the bottom.
     pub fn playlist(library: &Arc<Library>, playlist: &Playlist) -> Tracks {
         let mut facts = vec![count(playlist.entries.len(), glyphs::TRACK), length(playlist.duration())];
@@ -230,6 +233,10 @@ impl Tracks {
         let selected = app.queue_row.filter(|&r| r < n).unwrap_or(on);
         let mut t = Tracks::new(library, Plays::Queue, title, subtitle, facts, rows, selected);
         t.uris = uris;
+        // a playlist's shuffle, as on its page
+        if let crate::master::Source::Playlist { path } = &app.master.source {
+            t.shuffle = Some((path.clone(), crate::master::shuffled(path)));
+        }
         t
     }
 
@@ -380,42 +387,47 @@ pub fn wheel(ui: &mut Ui, area: R, s: &mut ui::Scroll) {
     s.clamp();
 }
 
-/// A tracks page, drawn in `area`.
+/// The head of every page with a list (an album's, a playlist's, the
+/// queue's, an artist's), in rem: the cover, the portrait, and the words
+/// beside them, as tall on all of them.
+const HEAD: f32 = 14.0;
+
+/// The head's height on a page, and the block under it that scrolls:
+/// the rows, the albums. A rem between the blocks, from the tabs to the
+/// player: half of it above the head and under the body is the header's
+/// and the player's own.
+fn head_and_body(area: R) -> (R, R) {
+    let head = R::new(area.x, area.y + rem(0.5), area.w, rem(HEAD));
+    let top = head.bottom() + rem(1.0);
+    (head, R::new(area.x, top, area.w, (area.bottom() - rem(0.5) - top).max(0.0)))
+}
+
+/// A tracks page, drawn in `area`: the head, still, and under it the rows
+/// in a block of their own that scrolls, down to the player.
 pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
-    wheel(ui, area, &mut t.scroll);
     let (x0, cw) = column(area);
-    ui.push_clip(area);
-    let top = area.y - t.scroll.offset;
-    let mut y = top + rem(0.5);
+    let (head, body) = head_and_body(area);
     let (current, playing) = app.current();
 
-    // the head: the picture, and beside it from the bottom up the facts
-    // and the buttons
-    let pic = if t.cover.is_some() { rem(16.0) } else { 0.0 };
+    // the head: the picture, and beside it from the top the title (two
+    // lines at most), the subtitle, the facts and the buttons; without a
+    // picture (a playlist, the queue) the words alone
+    let pic = if t.cover.is_some() { head.h } else { 0.0 };
     let fx = x0 + if pic > 0.0 { pic + rem(1.5) } else { 0.0 };
     let fw = (x0 + cw - fx).max(rem(4.0));
     let s = rem(0.5);
-    let title_lines = ui.face(Style::Title).wrap(&t.title, fw, 0);
-    let sub_lines = if t.subtitle.is_empty() { Vec::new() } else { ui.face(Style::Header).wrap(&t.subtitle, fw, 0) };
+    let title_lines = ui.face(Style::Title).wrap(&t.title, fw, 2);
+    let sub_lines = if t.subtitle.is_empty() { Vec::new() } else { ui.face(Style::Header).wrap(&t.subtitle, fw, 1) };
     let (lt, lh) = (ui.line(Style::Title), ui.line(Style::Header));
-    let button = rem(2.75);
-    let mut fh = title_lines.len() as f32 * lt + s + lh + s + rem(1.0) + button;
-    if !sub_lines.is_empty() {
-        fh += s + sub_lines.len() as f32 * lh;
-    }
-    let (sw, sh) = ui::switch_size();
-    if t.shuffle.is_some() {
-        fh += s + sh;
-    }
-    let head = pic.max(fh);
+    let button = crate::player::button_size(ui);
     if let Some((key, uri)) = &t.cover {
-        let r = R::new(x0, y, pic, pic);
+        let r = R::new(x0, head.y, pic, pic);
         match app.pictures.cover(key, uri) {
             Some(tex) => ui.picture(tex, r),
             None => ui.placeholder(glyphs::ALBUM, r, false),
         }
     }
-    let mut fy = y + head - fh;
+    let mut fy = head.y;
     for line in &title_lines {
         ui.text(Style::Title, line, fx, fy, fw);
         fy += lt;
@@ -438,21 +450,12 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     }
     fy += s;
     ui.text(Style::Subtitle, &t.facts, fx, fy, fw);
-    fy += lh;
-    if let Some((path, on)) = &t.shuffle {
-        fy += s;
-        if ui.switch(Vector2 { x: fx, y: fy }, glyphs::SHUFFLE, *on, true) {
-            app.act(Action::Shuffle(path.clone(), !on));
-        }
-        let _ = sw;
-        fy += sh;
-    }
-    fy += s + rem(1.0);
+    fy += lh + s;
     let mut bx = fx;
     let mut next = |ui: &mut Ui, glyph: &str, look: Look, sensitive: bool| {
         let r = R::new(bx, fy, button, button);
-        bx += button + rem(0.75);
-        ui.round_button(r, glyph, 1.25, look, sensitive)
+        bx += button + rem(0.5);
+        ui.button(r, glyph, 1.25, look, sensitive)
     };
     let here = t.selection().is_some_and(|(_, uri)| current == Some(uri));
     let any = !t.uris.is_empty();
@@ -475,39 +478,54 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
             }
         }
     }
-    y += head + rem(1.5);
+    // a playlist's shuffle after them, lit while on
+    if let Some((path, on)) = &t.shuffle {
+        if ui.button(R::new(bx, fy, button, button), glyphs::SHUFFLE, 1.25, if *on { Look::Suggested } else { Look::Plain }, true) {
+            app.act(Action::Shuffle(path.clone(), !on));
+        }
+    }
 
-    // the rows
+    // the rows, in their block
+    wheel(ui, body, &mut t.scroll);
+    ui.push_clip(body);
+    let top = body.y - t.scroll.offset;
+    let mut y = top;
     t.tops.clear();
     let n = t.rows.len();
     for i in 0..n {
         let h = row_height(ui, &t.rows[i]);
         let r = R::new(x0, y, cw, h);
         t.tops.push((y - top, y - top + h));
-        if r.bottom() >= area.y && r.y <= area.bottom() {
+        if r.bottom() >= body.y && r.y <= body.bottom() {
             draw_row(app, t, i, r, ui, current, playing);
         }
         y += h;
     }
+    // the block's corners rounded, where it shows
+    ui.round_corners(R::new(x0, body.y, cw, (y.min(body.bottom()) - body.y).max(0.0)), rem(ui::CORNER), ui::BG);
 
     if let Some((path, name)) = &t.delete {
         y += rem(1.0);
-        if ui.round_button(R::new(x0, y, button, button), glyphs::DELETE, 1.25, Look::Danger, true) {
+        if ui.button(R::new(x0, y, button, button), glyphs::DELETE, 1.25, Look::Danger, true) {
             app.act(Action::Modal(Modal::delete(path.clone(), name.clone())));
         }
         y += button;
     }
-    y += rem(4.0);
+    y += rem(1.0);
     t.scroll.content = y - top;
     if std::mem::take(&mut t.reveal) {
         if let Some(&(a, b)) = t.selected.and_then(|i| t.tops.get(i)) {
-            t.scroll.reveal(a, b);
+            if std::mem::take(&mut t.centre) {
+                t.scroll.offset = (a + b - t.scroll.view) / 2.0;
+            } else {
+                t.scroll.reveal(a, b);
+            }
             t.scroll.clamp();
             ui.wake(0.0);
         }
     }
     ui.pop_clip();
-    scrollbar(ui, area, &t.scroll);
+    scrollbar(ui, body, &t.scroll);
 }
 
 fn row_height(ui: &Ui, row: &Row) -> f32 {
@@ -635,7 +653,7 @@ fn edit_key(ui: &mut Ui, r: R, glyph: &str, sensitive: bool, lit: bool) -> bool 
     let over = sensitive && ui.hovered(r);
     ui.with_alpha(if sensitive { 1.0 } else { 0.5 }, |ui| {
         if over {
-            ui.circle(r.center(), r.w / 2.0, ui::HOVER);
+            ui.rounded(r, rem(ui::CORNER), ui::HOVER);
         }
         let color = if over { ui::FG } else if lit { ui::ACCENT } else { ui::ACCENT_BG };
         ui.icon(glyph, r, 1.0, color);
@@ -643,20 +661,23 @@ fn edit_key(ui: &mut Ui, r: R, glyph: &str, sensitive: bool, lit: bool) -> bool 
     sensitive && ui.click(r)
 }
 
-/// The artist: face, name, the words from the net, the grid of their
-/// albums under them, all one page that scrolls whole.
+/// The artist: face, name and the words from the net in the head, the
+/// words in a block of their own that scrolls; under it the grid of their
+/// albums, in another.
 pub struct ArtistPage {
     pub library: Arc<Library>,
     pub index: usize,
     /// Their albums, the newest first, those without a year last.
     pub grid: Grid,
+    /// The words' scroll.
+    pub words: ui::Scroll,
 }
 
 impl ArtistPage {
     pub fn new(library: &Arc<Library>, index: usize) -> ArtistPage {
         let mut albums = library.artists[index].albums.clone();
         albums.sort_by_key(|&a| std::cmp::Reverse(library.albums[a].year.as_deref().and_then(|y| y.get(..4)?.parse::<u32>().ok())));
-        ArtistPage { library: library.clone(), index, grid: Grid { order: albums, dealt: Some(library.clone()), ..Grid::default() } }
+        ArtistPage { library: library.clone(), index, grid: Grid { order: albums, dealt: Some(library.clone()), ..Grid::default() }, words: ui::Scroll::default() }
     }
 }
 
@@ -670,14 +691,11 @@ enum Bit<'a> {
 
 pub fn draw_artist(app: &App, page: &mut ArtistPage, ui: &mut Ui, area: R) {
     let artist = &page.library.artists[page.index];
-    wheel(ui, area, &mut page.grid.scroll);
     let (x0, cw) = column(area);
-    ui.push_clip(area);
-    let top = area.y - page.grid.scroll.offset;
-    let y = top + rem(0.5);
+    let (head, body) = head_and_body(area);
 
-    let side = rem(11.0);
-    let portrait = R::new(x0, y, side, side);
+    let side = head.h;
+    let portrait = R::new(x0, head.y, side, side);
     match app.pictures.face(&artist.name) {
         Some(tex) => {
             ui.circle(portrait.center(), side / 2.0, ui::SHADE);
@@ -687,13 +705,14 @@ pub fn draw_artist(app: &App, page: &mut ArtistPage, ui: &mut Ui, area: R) {
     }
     let wx = x0 + side + rem(1.5);
     let ww = (x0 + cw - wx).max(rem(4.0));
-    let mut wy = y;
+    let mut wy = head.y;
     let lt = ui.line(Style::Title);
-    for line in ui.face(Style::Title).wrap(&artist.name, ww, 0) {
+    for line in ui.face(Style::Title).wrap(&artist.name, ww, 1) {
         ui.text(Style::Title, &line, wx, wy, ww);
         wy += lt;
     }
-    // the words, then glyphs as links: the article's, then the retry
+    // the words, then glyphs as links: the article's, then the retry; in
+    // the rest of the head, scrolling
     if let Some(known) = app.pictures.words(&artist.name) {
         wy += rem(0.5);
         let mut bits: Vec<Bit> = Vec::new();
@@ -709,28 +728,34 @@ pub fn draw_artist(app: &App, page: &mut ArtistPage, ui: &mut Ui, area: R) {
             bits.push(Bit::Link(glyphs::WIKIPEDIA, Action::OpenUrl(url.clone())));
         }
         bits.push(Bit::Link(glyphs::RETRY, Action::Retry(artist.name.clone())));
-        wy = flow(app, ui, bits, wx, wy, ww);
+        let words = R::new(wx, wy, x0 + cw - wx, (head.bottom() - wy).max(0.0));
+        wheel(ui, words, &mut page.words);
+        ui.push_clip(words);
+        let top = words.y - page.words.offset;
+        page.words.content = flow(app, ui, bits, wx, top, ww - rem(1.0)) - top;
+        ui.pop_clip();
+        scrollbar(ui, words, &page.words);
     }
-    let head = side.max(wy - y);
-    let mut gy = y + head + rem(1.0);
 
-    // the albums, three across the column
+    // the albums, three across the column, in their block
+    wheel(ui, body, &mut page.grid.scroll);
+    ui.push_clip(body);
+    let top = body.y - page.grid.scroll.offset;
     let gw = size::column() + size::gap();
     let gx = (area.x + (area.w - gw) / 2.0).round().max(area.x);
     let library = page.library.clone();
-    let h = view::draw_grid(app, ui, &mut page.grid, view::Cards::Albums(&library), gx, gw, size::COLUMNS, gy, area);
-    gy += h + rem(4.0);
-    page.grid.scroll.content = gy - top;
+    let h = view::draw_grid(app, ui, &mut page.grid, view::Cards::Albums(&library), gx, gw, size::COLUMNS, top, body);
+    page.grid.scroll.content = h + rem(1.0);
     if std::mem::take(&mut page.grid.reveal) {
         let row = page.grid.selected / size::COLUMNS;
         let rh = view::card_height(ui) + size::gap();
-        let at = y + head + rem(1.0) - top + row as f32 * rh;
+        let at = row as f32 * rh;
         page.grid.scroll.reveal(at, at + rh);
         page.grid.scroll.clamp();
         ui.wake(0.0);
     }
     ui.pop_clip();
-    scrollbar(ui, area, &page.grid.scroll);
+    scrollbar(ui, body, &page.grid.scroll);
 }
 
 /// The words laid in lines `w` wide from `y`; the links underlined, a

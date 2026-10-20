@@ -76,9 +76,9 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
         let r = R::new(x, y, w, th);
         let over = ui.hovered(r);
         if *tab == app.tab {
-            ui.rounded(r, rem(0.5), if over { ui::HOVER } else { ui::SHADE });
+            ui.rounded(r, rem(ui::CORNER), if over { ui::HOVER } else { ui::SHADE });
         } else if over {
-            ui.rounded(r, rem(0.5), ui::FLAT_HOVER);
+            ui.rounded(r, rem(ui::CORNER), ui::FLAT_HOVER);
         }
         let tx = x + rem(0.75);
         let nw = ui.text(Style::Title, &(i + 1).to_string(), tx, y + rem(0.25), f32::MAX);
@@ -144,6 +144,7 @@ fn root(app: &mut App, ui: &mut Ui, area: R) {
                 // the same place over a rebuild
                 if let Some(old) = &app.queue_scroll {
                     t.scroll = *old;
+                    t.centre = false;
                 }
                 t
             });
@@ -221,19 +222,19 @@ pub fn draw_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, x: f32, 
     rows as f32 * rh
 }
 
-/// The round play button in the bottom right corner of a card's
-/// picture, plain as the player's square buttons; true on a click.
+/// The play button in the bottom right corner of a card's picture,
+/// plain as the player's; true on a click.
 fn play_button(ui: &mut Ui, picture: R) -> bool {
     let b = rem(2.75);
     let r = R::new(picture.right() - rem(0.5) - b, picture.bottom() - rem(0.5) - b, b, b);
-    ui.round_button(r, glyphs::PLAY, 1.0, Look::Plain, true)
+    ui.button(r, glyphs::PLAY, 1.0, Look::Plain, true)
 }
 
 fn card_background(ui: &Ui, cell: R, over: bool, selected: bool) {
     if selected {
-        ui.rect(cell, ui::SHADE);
+        ui.rounded(cell, rem(ui::CORNER), ui::SHADE);
     } else if over {
-        ui.rect(cell, ui::CARD);
+        ui.rounded(cell, rem(ui::CORNER), ui::CARD);
     }
 }
 
@@ -346,9 +347,9 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
         }
         let over = ui.hovered(cell);
         if i == grid.selected {
-            ui.rect(cell, if over { ui::HOVER } else { ui::SHADE });
+            ui.rounded(cell, rem(ui::CORNER), if over { ui::HOVER } else { ui::SHADE });
         } else if over {
-            ui.rect(cell, ui::CARD);
+            ui.rounded(cell, rem(ui::CORNER), ui::CARD);
         }
         let mut y = cell.y + pad;
         for line in &names[i] {

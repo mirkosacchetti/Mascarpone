@@ -106,14 +106,13 @@ impl Master {
     pub fn describe(&self, library: &Library) -> (String, String) {
         match &self.source {
             Source::None => ("Queue".into(), "empty".into()),
-            // what it is by its glyph, not by a word
+            // what it is by its glyph beside the name, not by a word
             Source::Album { key } => match library.album_by_key(key) {
-                Some(a) => (a.title.clone(), format!("{}  {}", glyphs::ALBUM, a.artist)),
+                Some(a) => (format!("{}  {}", glyphs::ALBUM, a.title), a.artist.clone()),
                 None => ("Queue".into(), glyphs::ALBUM.into()),
             },
-            // a playlist by its name alone
-            Source::Playlist { path } => (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), String::new()),
-            Source::Anon => (ANON.into(), String::new()),
+            Source::Playlist { path } => (format!("{}  {}", glyphs::PLAYLIST, path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()), String::new()),
+            Source::Anon => (format!("{}  {ANON}", glyphs::PLAYLIST), String::new()),
         }
     }
 

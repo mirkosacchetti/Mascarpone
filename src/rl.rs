@@ -151,6 +151,7 @@ extern "C" {
     pub fn DrawRectangleRec(rec: Rectangle, color: Color);
     pub fn DrawRectangleRounded(rec: Rectangle, roundness: f32, segments: c_int, color: Color);
     pub fn DrawCircleV(center: Vector2, radius: f32, color: Color);
+    pub fn DrawTriangleFan(points: *const Vector2, count: c_int, color: Color);
     pub fn DrawTexturePro(texture: Texture, source: Rectangle, dest: Rectangle, origin: Vector2, rotation: f32, tint: Color);
 
     pub fn LoadTextureFromImage(image: Image) -> Texture;

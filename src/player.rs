@@ -26,16 +26,20 @@ use crate::ui::{self, Look, Style, Ui, R};
 const EDGE: f32 = 0.5;
 /// The player's room at its bottom, in rem.
 const BOTTOM: f32 = 2.0;
+/// Play and pause's round button, bigger than the rest, in rem.
+const BIG: f32 = 3.25;
 /// Around the song's title, in rem.
 const PAD: f32 = 1.0;
 
-fn row_height(ui: &Ui) -> f32 {
-    ui.line(Style::Header).max(ui::switch_size().1)
+/// The buttons' side, the player's and the pages' heads': a line, two
+/// rem at least.
+pub fn button_size(ui: &Ui) -> f32 {
+    ui.line(Style::Header).max(rem(2.0))
 }
 
 pub fn height(ui: &Ui) -> f32 {
     // the times, the time, the transport
-    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + row_height(ui) + rem(BOTTOM)
+    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(button_size(ui)) + rem(BOTTOM)
 }
 
 pub fn draw(app: &App, ui: &mut Ui, r: R) {
@@ -86,23 +90,24 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         ui.wake(1.0 - at.as_secs_f64().fract());
     }
 
-    // the transport: previous and next, round and flat, and between them
-    // play while paused, pause while playing, round and filled; the size
-    // of the square buttons beside it, the album's and the artist's on the
-    // left, the repeats on the right; all half a rem under the time
-    let rh = row_height(ui);
-    let row = bar.bottom() + rem(EDGE);
-    let margin = rem(0.5);
-    let all = 3.0 * rh + 6.0 * margin;
+    // the transport, half a rem under the time: previous and next, round
+    // and flat, and between them the big one, play while paused, pause
+    // while playing; the square buttons beside it level with its middle,
+    // the album's and the artist's on the left, the repeats on the right
+    let rh = button_size(ui);
+    let (small, big, margin) = (rem(2.25), rem(BIG), rem(0.5));
+    let mid = bar.bottom() + rem(EDGE) + big.max(rh) / 2.0;
+    let row = (mid - rh / 2.0).round();
+    let all = 2.0 * small + big + 6.0 * margin;
     let mut x = (x0 + (cw - all) / 2.0).round();
-    for (glyph, command, main) in [
-        (glyphs::PREVIOUS, Command::Previous, false),
-        (if playing { glyphs::PAUSE } else { glyphs::PLAY }, Command::Toggle, true),
-        (glyphs::NEXT, Command::Next, false),
+    for (glyph, size, command, main) in [
+        (glyphs::PREVIOUS, small, Command::Previous, false),
+        (if playing { glyphs::PAUSE } else { glyphs::PLAY }, big, Command::Toggle, true),
+        (glyphs::NEXT, small, Command::Next, false),
     ] {
         x += margin;
-        let b = R::new(x, row, rh, rh);
-        x += rh + margin;
+        let b = R::new(x, (mid - size / 2.0).round(), size, size);
+        x += size + margin;
         let over = ui.hovered(b);
         let held = over && ui.held(b);
         let (bg, fg) = if main {
@@ -111,9 +116,9 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
             (if held { Some(ui::HOVER) } else if over { Some(ui::SHADE) } else { None }, ui::FG)
         };
         if let Some(bg) = bg {
-            ui.circle(b.center(), rh / 2.0, bg);
+            ui.circle(b.center(), size / 2.0, bg);
         }
-        ui.icon(glyph, b, 1.25, fg);
+        ui.icon(glyph, b, 1.75, fg);
         if ui.click(b) {
             app.act(Action::Mpd(command));
         }
@@ -131,7 +136,7 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let repeats = x0 + cw - 2.0 * rh - rem(0.5);
     let mut x = repeats;
     for (glyph, on, command) in [(glyphs::REPEAT, repeat && !single, Command::RepeatAll), (glyphs::REPEAT_ONE, repeat && single, Command::RepeatOne)] {
-        if ui.square_button(R::new(x, row, rh, rh), glyph, 1.25, if on { Look::Suggested } else { Look::Plain }, true) {
+        if ui.button(R::new(x, row, rh, rh), glyph, 1.25, if on { Look::Suggested } else { Look::Plain }, true) {
             app.act(Action::Mpd(if on { Command::RepeatOff } else { command }));
         }
         x += rh + rem(0.5);
@@ -150,12 +155,12 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         None => now.and_then(|n| n.song.as_ref()).and_then(|s| s.song.artists().first().cloned()),
     };
     if (now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.playlist().is_some())
-        && ui.square_button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true)
+        && ui.button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true)
     {
         open_source(app);
     }
     if let Some(filed) = artist {
-        if ui.square_button(R::new(x0, row, rh, rh), glyphs::ARTIST, 1.25, Look::Plain, true) {
+        if ui.button(R::new(x0, row, rh, rh), glyphs::ARTIST, 1.25, Look::Plain, true) {
             app.act(Action::OpenArtist(filed));
         }
     }

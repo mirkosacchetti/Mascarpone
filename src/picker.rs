@@ -479,7 +479,7 @@ impl Modal {
                 for (i, (label, color)) in [("Cancel", ui::FG), ("Delete", ui::DESTRUCTIVE)].into_iter().enumerate() {
                     let b = R::new(r.x + pad + i as f32 * (bw + rem(0.75)), y, bw, button);
                     let over = ui.hovered(b);
-                    ui.rounded(b, rem(0.5), if over && ui.held(b) { ui::BUTTON_ACTIVE } else if over { ui::BUTTON_HOVER } else { ui::BUTTON });
+                    ui.rounded(b, rem(ui::CORNER), if over && ui.held(b) { ui::BUTTON_ACTIVE } else if over { ui::BUTTON_HOVER } else { ui::BUTTON });
                     let lw = ui.width(Style::Header, label);
                     ui.text_in(Style::Header, label, (b.x + (b.w - lw) / 2.0).round(), (b.y + (b.h - ui.line(Style::Header)) / 2.0).round(), bw, color);
                     if ui.click(b) {

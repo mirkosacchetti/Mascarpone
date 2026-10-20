@@ -93,10 +93,14 @@ KP_Subtract, KP_0. Every action and its default keys:
 Albums, Artists, Playlists and Queue in the header, which stays over
 every page; a click on a tab, even the one on, comes back to its list,
 dealt again (the keys below are the defaults: 1 to 4 or Ctrl+Tab
-switch, Escape goes back a page). The
-album and artist grids come in a random order, dealt again by a click
-on their tab, by its key, and by Ctrl+R, which also refreshes: mpd
-updates its database and the library is read again. When mpd's
+switch, Escape goes back a page). An album's, a playlist's, an
+artist's page and the queue have the same head on top, still (the
+cover or the portrait, the words beside it, an artist's scrolling on
+their own), and under it the tracks or the albums in a block that
+scrolls, down to the player; opened, the queue shows the song on in its
+middle. The album and artist grids come in a random order, dealt again
+by a click on their tab, by its key, and by Ctrl+R, which also
+refreshes: mpd updates its database and the library is read again. When mpd's
 database changes by itself (files synced in), the library is read again
 once it has been still for 30 minutes.
 
@@ -133,8 +137,9 @@ opens, Escape closes.
 
 The playlists are the m3u files in `Playlists` under the music folder
 (`~/Music`, both set in the configuration), their entries relative to the file; an entry the library
-does not have is shown greyed and skipped. Shuffle, a switch under a
-playlist's facts (on unless switched off), plays it in a random order
+does not have is shown greyed and skipped. Shuffle, a square button
+after a playlist's (and the queue's, when it plays one) other buttons,
+lit while on (on unless switched off), plays it in a random order
 (mpd's random mode, the queue in the file's order), from any track; an
 album always plays in order. It is kept in
 `~/.local/state/mascarpone/shuffle.json` by the playlist's name, not in

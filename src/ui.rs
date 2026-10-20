@@ -1,6 +1,6 @@
 //! The frame's tools: the input of this frame, the palette (lintel's),
 //! the four kinds of text, the shapes, the clip, and the few widgets
-//! every page uses (links, round buttons, switches, a scroll), drawn and
+//! every page uses (links, buttons, a scroll), drawn and
 //! asked at once: a click is a release where the press began, on a
 //! widget that has not given it to one inside it first (each draws its
 //! insides first and asks after).
@@ -114,6 +114,10 @@ impl Style {
         }
     }
 }
+
+/// The corners' round, in rem: the tabs', the buttons', the cards', the
+/// lists'.
+pub const CORNER: f32 = 0.5;
 
 /// How a button looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -518,6 +522,33 @@ impl Ui {
         unsafe { rl::DrawRectangleRounded(r.rl(), roundness, 24, self.tint(c)) };
     }
 
+    /// The corners of `r` rounded by `radius` from the outside: what is
+    /// outside the round painted over in `bg`, the ground behind; for a
+    /// block made of pieces that are square each.
+    pub fn round_corners(&self, r: R, radius: f32, bg: Color) {
+        let radius = radius.min(r.w / 2.0).min(r.h / 2.0);
+        if radius <= 0.0 {
+            return;
+        }
+        const STEPS: usize = 8;
+        // each corner, the arc's centre, and the angle it starts from
+        let corners = [
+            (Vector2 { x: r.x, y: r.y }, Vector2 { x: r.x + radius, y: r.y + radius }, 180.0f32),
+            (Vector2 { x: r.right(), y: r.y }, Vector2 { x: r.right() - radius, y: r.y + radius }, 270.0),
+            (Vector2 { x: r.right(), y: r.bottom() }, Vector2 { x: r.right() - radius, y: r.bottom() - radius }, 0.0),
+            (Vector2 { x: r.x, y: r.bottom() }, Vector2 { x: r.x + radius, y: r.bottom() - radius }, 90.0),
+        ];
+        for (corner, centre, from) in corners {
+            // a fan from the corner along the arc
+            let mut points = [corner; STEPS + 2];
+            for (i, p) in points[1..].iter_mut().enumerate() {
+                let a = (from + 90.0 * i as f32 / STEPS as f32).to_radians();
+                *p = Vector2 { x: centre.x + radius * a.cos(), y: centre.y + radius * a.sin() };
+            }
+            unsafe { rl::DrawTriangleFan(points.as_ptr(), points.len() as i32, self.tint(bg)) };
+        }
+    }
+
     pub fn circle(&self, center: Vector2, radius: f32, c: Color) {
         unsafe { rl::DrawCircleV(center, radius, self.tint(c)) };
     }
@@ -609,20 +640,8 @@ impl Ui {
         face.draw_centered(glyph, r.center(), self.tint(c));
     }
 
-    /// A round button filling `r`, only its glyph at `em` rem; true on a
-    /// click.
-    pub fn round_button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
-        self.button(r, None, glyph, em, look, sensitive)
-    }
-
-    /// A round button's square sister, its corners rounded half a rem,
-    /// the tabs'.
-    pub fn square_button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
-        self.button(r, Some(rem(0.5)), glyph, em, look, sensitive)
-    }
-
-    /// A button: round without a corner's radius, square with one.
-    fn button(&mut self, r: R, corner: Option<f32>, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
+    /// A button filling `r`, only its glyph at `em` rem; true on a click.
+    pub fn button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
         let over = sensitive && self.hovered(r);
         let held = over && self.held(r);
         let (bg, fg) = match look {
@@ -632,38 +651,11 @@ impl Ui {
             Look::Danger => (if held { Some(BUTTON_HOVER) } else if over { Some(FLAT_HOVER) } else { None }, DESTRUCTIVE),
         };
         self.with_alpha(if sensitive { 1.0 } else { 0.5 }, |ui| {
-            match (bg, corner) {
-                (Some(bg), Some(corner)) => ui.rounded(r, corner, bg),
-                (Some(bg), None) => ui.circle(r.center(), r.w / 2.0, bg),
-                (None, _) => {}
+            if let Some(bg) = bg {
+                ui.rounded(r, rem(CORNER), bg);
             }
             ui.icon(glyph, r, em, fg);
         });
         sensitive && self.click(r)
     }
-
-    /// A switch with the glyph of what it switches in its knob: a track,
-    /// the knob at its start while off and at its end, in the accent,
-    /// while on. Its size: `switch_size`. True on a click.
-    pub fn switch(&mut self, at: Vector2, glyph: &str, on: bool, sensitive: bool) -> bool {
-        let (w, h) = switch_size();
-        let r = R::new(at.x, at.y, w, h);
-        let over = sensitive && self.hovered(r);
-        self.with_alpha(if sensitive { 1.0 } else { 0.5 }, |ui| {
-            let track = if on { ACCENT_BG } else if over { HOVER } else { SHADE };
-            ui.rounded(r, h / 2.0, track);
-            let pad = rem(0.25);
-            let knob = rem(1.5);
-            let x = if on { r.right() - pad - knob } else { r.x + pad };
-            let k = R::new(x, r.y + pad, knob, knob);
-            ui.circle(k.center(), knob / 2.0, FG);
-            ui.icon(glyph, k, 1.0, BG);
-        });
-        sensitive && self.click(r)
-    }
-}
-
-/// A switch's track: three rem by one and a half, a quarter around.
-pub fn switch_size() -> (f32, f32) {
-    (rem(3.0) + 2.0 * rem(0.25), rem(1.5) + 2.0 * rem(0.25))
 }

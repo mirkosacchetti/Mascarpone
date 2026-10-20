@@ -356,7 +356,12 @@ impl App {
                 self.playlists.selected = 0;
                 self.playlists.scroll.offset = 0.0;
             }
-            Tab::Queue => self.queue = None,
+            // shown anew: on the song on, in the middle
+            Tab::Queue => {
+                self.queue = None;
+                self.queue_scroll = None;
+                self.queue_row = None;
+            }
         }
         self.shown_at = Instant::now();
     }
@@ -686,12 +691,14 @@ impl App {
                     eprintln!("{}: {e}", path.display());
                     return;
                 }
-                for page in &mut self.pages {
-                    if let Page::Playlist(t) = page {
-                        if let Some((p, s)) = &mut t.shuffle {
-                            if *p == path {
-                                *s = on;
-                            }
+                let playlists = self.pages.iter_mut().filter_map(|page| match page {
+                    Page::Playlist(t) => Some(t),
+                    _ => None,
+                });
+                for t in playlists.chain(self.queue.as_mut()) {
+                    if let Some((p, s)) = &mut t.shuffle {
+                        if *p == path {
+                            *s = on;
                         }
                     }
                 }
