@@ -12,7 +12,7 @@ use crate::library::Library;
 use crate::master::Source;
 use crate::pages::{self, count, length, ArtistPage, Tracks};
 use crate::size::{self, rem};
-use crate::ui::{self, Style, Ui, R};
+use crate::ui::{self, Look, Style, Ui, R};
 
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let header = header_height(ui);
@@ -221,6 +221,14 @@ pub fn draw_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, x: f32, 
     rows as f32 * rh
 }
 
+/// The round play button in the bottom right corner of a card's
+/// picture, plain as the player's square buttons; true on a click.
+fn play_button(ui: &mut Ui, picture: R) -> bool {
+    let b = rem(2.75);
+    let r = R::new(picture.right() - rem(0.5) - b, picture.bottom() - rem(0.5) - b, b, b);
+    ui.round_button(r, glyphs::PLAY, 1.0, Look::Plain, true)
+}
+
 fn card_background(ui: &Ui, cell: R, over: bool, selected: bool) {
     if selected {
         ui.rect(cell, ui::SHADE);
@@ -244,15 +252,8 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
         Some(t) => ui.picture(t, cover),
         None => ui.placeholder(glyphs::ALBUM, cover, false),
     }
-    if over || selected {
-        let b = rem(2.75);
-        let r = R::new(cover.right() - rem(0.5) - b, cover.bottom() - rem(0.5) - b, b, b);
-        let hot = ui.hovered(r);
-        ui.circle(r.center(), b / 2.0, if hot { ui::FG } else { ui::ACCENT });
-        ui.icon(glyphs::PLAY, r, 1.0, ui::BG);
-        if ui.click(r) {
-            app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
-        }
+    if (over || selected) && play_button(ui, cover) {
+        app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
     }
     let y = cover.bottom() + rem(0.25);
     ui.text(Style::Header, &album.title, cover.x, y, side);
@@ -301,8 +302,9 @@ fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize
 
 /// The playlists as cards, two across the column of three album cards:
 /// the name and the facts on the left, on the right the covers of the
-/// first sixteen albums its tracks come from. A click opens one; the
-/// same keys as the grids.
+/// first sixteen albums its tracks come from, a play button on them (on
+/// the card under the pointer and on the selected one). A click opens
+/// one; the same keys as the grids.
 fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, area: R) {
     let playlists = library.playlists();
     grid.order = (0..playlists.len()).collect();
@@ -378,6 +380,10 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
                 Some(tex) => ui.picture(tex, r),
                 None => ui.placeholder(glyphs::ALBUM, r, false),
             }
+        }
+        // on the mosaic, as on an album's cover, the play button
+        if (over || i == grid.selected) && p.missing() < p.entries.len() && play_button(ui, R::new(mx, cell.y + pad, mosaic, mosaic)) {
+            app.act(Action::Load { source: Source::Playlist { path: p.path.clone() }, uris: p.uris(), start: 0 });
         }
         if ui.click(cell) {
             grid.selected = i;

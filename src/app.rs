@@ -122,15 +122,12 @@ pub enum Action {
 }
 
 /// The song's clock between two statuses: the moment the status came,
-/// the song's elapsed and length, the queue's length before the song and
-/// whole.
+/// the song's elapsed and length.
 #[derive(Clone, Copy)]
 pub struct Clock {
     pub since: Instant,
     pub elapsed: Duration,
     pub length: Duration,
-    pub before: Duration,
-    pub whole: Duration,
 }
 
 pub struct App {
@@ -143,8 +140,6 @@ pub struct App {
     /// The last status mpd sent.
     pub now: Option<Now>,
     pub master: Master,
-    /// The queue's songs' lengths, in order, for the master's time.
-    pub lengths: Vec<Option<Duration>>,
     pub clock: Option<Clock>,
     /// The row selected on the queue's tab, kept over its rebuilds.
     pub queue_row: Option<usize>,
@@ -184,7 +179,6 @@ impl App {
             library: None,
             now: None,
             master: Master::load(),
-            lengths: Vec::new(),
             clock: None,
             queue_row: None,
             queue: None,
@@ -312,9 +306,8 @@ impl App {
             }
             Event::Queue(songs) => {
                 let uris: Vec<String> = songs.iter().map(|(u, _)| u.clone()).collect();
-                self.lengths = songs.into_iter().map(|(_, d)| d).collect();
                 self.master.reconcile(&uris);
-                // the master's total changed with it
+                // stopped, the track waiting may be another
                 self.set_clock();
                 self.queue = None;
             }
@@ -332,20 +325,16 @@ impl App {
     /// The clock set again from the last status and the queue.
     fn set_clock(&mut self) {
         let Some(now) = &self.now else { return };
-        let summed = |l: &[Option<Duration>]| l.iter().map(|d| d.unwrap_or_default()).sum::<Duration>();
         self.clock = match (&now.song, now.status.elapsed) {
             (Some(entry), Some(elapsed)) => {
                 let length = now.status.duration.or(entry.song.duration).unwrap_or_default();
-                let before = summed(&self.lengths[..entry.position.0.min(self.lengths.len())]);
-                Some(Clock { since: Instant::now(), elapsed, length, before, whole: summed(&self.lengths) })
+                Some(Clock { since: Instant::now(), elapsed, length })
             }
-            // the waiting first track: at its start, the list's at its start
+            // the waiting first track: at its start
             _ => self.waiting().map(|(library, a, t)| Clock {
                 since: Instant::now(),
                 elapsed: Duration::ZERO,
                 length: library.albums[a].tracks[t].duration.unwrap_or_default(),
-                before: Duration::ZERO,
-                whole: summed(&self.lengths),
             }),
         };
     }

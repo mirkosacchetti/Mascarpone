@@ -101,7 +101,8 @@ once it has been still for 30 minutes.
 
 One card is selected: j and ; move it left and right, k and l down and
 up, Enter opens it, as does a click; the play button on an album's
-cover (under the pointer, or on the selected card) plays the album. The
+cover or a playlist's covers (under the pointer, or on the selected
+card) plays the album or the playlist. The
 artist on an album card opens their page. On an album's or playlist's
 page one track is selected (k and l, or Down and Up, move it; a click
 plays from a row, or pauses the song on): Play and Enter play the list
@@ -110,12 +111,12 @@ appends. Space (or c) pauses and resumes anywhere, z, x and v go back,
 stop and go on; Tab alone does nothing. Ctrl+K lists every command with
 its keys: type to find one, Enter does it.
 
-The player bar at the bottom has the time along its top edge (a click
-or a drag seeks); under it the song's title (it opens the queue) and the
+The player bar at the bottom has the song's title over the time (a
+click or a drag seeks), where the song is and its length at its ends;
+under it a row of buttons: the artist (it opens their page) and the
 album or playlist the queue plays (it opens its page) on the left,
-previous, play and next in the middle, the song's and the queue's times
-with repeat one (mpd's single and repeat together) and repeat on the
-right.
+previous, play and next in the middle, repeat and repeat one (mpd's
+single and repeat together) on the right, lit while on.
 
 `/` opens the picker on everything: albums, artists, playlists and,
 once something is typed, every track; Enter opens its page, a track's
@@ -177,12 +178,11 @@ from (`~/.local/state/mascarpone/master.json`). Play on an album or a playlist
 loads it whole and points there; Add to queue appends and drops the
 pointer: the queue is then the Anon Playlist, put together by hand, until
 Save as playlist on the Queue tab writes it as an m3u8 file in
-`Playlists` and points there. The player bar names what the queue
-plays: the album, or the playlist (a saved one or the Anon Playlist),
-next to the queue's time and repeat. Queue is the fourth tab (`4`, or the
-song's title in the player bar); there every row can be moved up and
-down (L and K on the selected one) and removed (d or Delete), and
-Clear empties the queue. Other clients change the queue too: when it no
+`Playlists` and points there. The player bar's album button shows what
+the queue plays, an album or a playlist (a saved one or the Anon
+Playlist), and opens it. Queue is the fourth tab (`4`); there every row
+can be moved up and down (L and K on the selected one) and removed (d or
+Delete), and Clear empties the queue. Other clients change the queue too: when it no
 longer matches the list pointed to, the pointer drops. On a track (a
 selected row of an album or playlist page) `a` adds it to a playlist,
 picked or created by name; a playlist the master points to grows in

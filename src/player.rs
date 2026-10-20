@@ -1,11 +1,12 @@
-//! The bar at the bottom: the time along its top edge (a click or a
-//! drag seeks); under it, in three equal columns, the song's title over
-//! the album or playlist the queue plays on the left, the transport in
-//! the middle, the song's time and repeat one over the queue's time and
-//! repeat on the right:
+//! The bar at the bottom: on top the time (a click or a drag seeks),
+//! where the song is and its length just over its ends, the song's
+//! title centred between; half a rem under it the transport, centred,
+//! and beside it, as far under the time, the song's artist and the
+//! album or playlist the queue plays, a button each, on the left, repeat
+//! and repeat one side by side on the right:
+//!   0:03                 title                16:24
 //!   ───────────────── time ─────────────────
-//!   ♫ title               0:03 / 16:24 ⟲1
-//!   ◉ album    ⏮  ⏯  ⏭  3:20 / 42:24 ⟲
+//!   [☺] [◉]           ⏮  ⏯  ⏭           [⟲] [⟲1]
 
 use std::time::Duration;
 
@@ -18,24 +19,23 @@ use crate::master::Source;
 use crate::mpd::Command;
 use crate::rl::Vector2;
 use crate::size::rem;
-use crate::ui::{self, Style, Ui, R};
+use crate::ui::{self, Look, Style, Ui, R};
 
-/// The player's room under its time's bar and at its bottom, in rem: the
+/// The player's room at its top and between its rows, in rem: the
 /// header's, above and under the tabs.
 const EDGE: f32 = 0.5;
-/// Between the player's columns, in rem.
+/// The player's room at its bottom, in rem.
+const BOTTOM: f32 = 2.0;
+/// Around the song's title, in rem.
 const PAD: f32 = 1.0;
 
 fn row_height(ui: &Ui) -> f32 {
     ui.line(Style::Header).max(ui::switch_size().1)
 }
 
-fn lines_height(ui: &Ui) -> f32 {
-    (2.0 * row_height(ui) + rem(0.25)).max(rem(3.25))
-}
-
 pub fn height(ui: &Ui) -> f32 {
-    rem(0.5) + rem(EDGE) + lines_height(ui) + rem(EDGE)
+    // the times, the time, the transport
+    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + row_height(ui) + rem(BOTTOM)
 }
 
 pub fn draw(app: &App, ui: &mut Ui, r: R) {
@@ -56,8 +56,11 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let clock = app.clock;
     let length = clock.map(|c| c.length).unwrap_or_default();
     let mut at = clock.map(|c| if playing { c.elapsed + c.since.elapsed() } else { c.elapsed }.min(c.length)).unwrap_or_default();
-    let bar = R::new(x0, r.y, cw, rem(0.5));
-    let grip = R::new(bar.x, bar.y, bar.w, bar.h + rem(0.25));
+    // over it where the song is and its length
+    let lh = ui.line(Style::Header);
+    let times = r.y + rem(EDGE);
+    let bar = R::new(x0, times + lh + rem(0.25), cw, rem(0.5));
+    let grip = R::new(bar.x, bar.y - rem(0.25), bar.w, bar.h + rem(0.5));
     let seekable = !length.is_zero();
     let to = |ui: &Ui| Duration::from_secs_f64((((ui.mouse.x - bar.x) / bar.w).clamp(0.0, 1.0) as f64) * length.as_secs_f64());
     if seekable && ui.press(grip) {
@@ -69,9 +72,13 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     if seekable && ui.drag == Some("seek") {
         at = to(ui);
     }
-    ui.rect(bar, ui::SHADE);
+    // its corners rounded as the tabs' are, which at its height is round
+    ui.rounded(bar, rem(0.5), ui::SHADE);
     let k = if seekable { (at.as_secs_f64() / length.as_secs_f64()) as f32 } else { 0.0 };
-    ui.rect(R::new(bar.x, bar.y, (bar.w * k).round(), bar.h), ui::ACCENT_BG);
+    let done = (bar.w * k).round();
+    if done > 0.0 {
+        ui.rounded(R::new(bar.x, bar.y, done, bar.h), rem(0.5), ui::ACCENT_BG);
+    }
     if seekable && (ui.hovered(grip) || ui.drag == Some("seek")) {
         ui.circle(Vector2 { x: bar.x + bar.w * k, y: bar.y + bar.h / 2.0 }, rem(0.5), ui::ACCENT);
     }
@@ -79,61 +86,23 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         ui.wake(1.0 - at.as_secs_f64().fract());
     }
 
-    let top = r.y + rem(0.5) + rem(EDGE);
-    let lines = lines_height(ui);
-    let rh = row_height(ui);
-    let rows = [top + (lines - 2.0 * rh - rem(0.25)) / 2.0, top + (lines + rem(0.25)) / 2.0];
-    let col = ((cw - 2.0 * rem(PAD)) / 3.0).floor();
-    let lh = ui.line(Style::Header);
-    let text_y = |row: f32| (row + (rh - lh) / 2.0).round();
-
-    // the left: the song's title (it opens the queue), the album or
-    // playlist the queue plays (it opens its page)
-    let mark = lh;
-    let title = match now.and_then(|n| n.song.as_ref()) {
-        Some(entry) => entry.song.title().unwrap_or(&entry.song.url).to_owned(),
-        // stopped at the end of the list: the list stays, its first track
-        // ready, the way a paused one shows
-        None => match app.waiting() {
-            Some((library, a, t)) => library.albums[a].tracks[t].title.clone(),
-            None => glyphs::NOTHING.to_owned(),
-        },
-    };
-    let tx = x0 + mark + rem(0.5);
-    ui.icon(glyphs::TRACK, R::new(x0, text_y(rows[0]), mark, mark), 1.0, ui::FG);
-    if ui.link(Style::Header, &title, tx, text_y(rows[0]), col - mark - rem(0.5)).0 {
-        app.act(Action::Tab(Tab::Queue));
-    }
-    let (glyph, source) = match app.master.playlist() {
-        Some(list) => (glyphs::PLAYLIST, Some(list)),
-        None => (
-            glyphs::ALBUM,
-            now.and_then(|n| n.song.as_ref())
-                .and_then(|s| s.song.album().map(str::to_owned))
-                .or_else(|| app.waiting().map(|(library, a, _)| library.albums[a].title.clone())),
-        ),
-    };
-    if let Some(source) = source {
-        ui.icon(glyph, R::new(x0, text_y(rows[1]), mark, mark), 1.0, ui::ACCENT);
-        if ui.link(Style::Subtitle, &source, tx, text_y(rows[1]), col - mark - rem(0.5)).0 {
-            open_source(app);
-        }
-    }
-
     // the transport: previous and next, round and flat, and between them
-    // the big one, play while paused, pause while playing
-    let (small, big, margin) = (rem(2.25), rem(3.25), rem(0.5));
-    let all = 2.0 * small + big + 6.0 * margin;
-    let mut x = (x0 + col + rem(PAD) + (col - all) / 2.0).round();
-    let mid = top + lines / 2.0;
-    for (glyph, size, command, main) in [
-        (glyphs::PREVIOUS, small, Command::Previous, false),
-        (if playing { glyphs::PAUSE } else { glyphs::PLAY }, big, Command::Toggle, true),
-        (glyphs::NEXT, small, Command::Next, false),
+    // play while paused, pause while playing, round and filled; the size
+    // of the square buttons beside it, the album's and the artist's on the
+    // left, the repeats on the right; all half a rem under the time
+    let rh = row_height(ui);
+    let row = bar.bottom() + rem(EDGE);
+    let margin = rem(0.5);
+    let all = 3.0 * rh + 6.0 * margin;
+    let mut x = (x0 + (cw - all) / 2.0).round();
+    for (glyph, command, main) in [
+        (glyphs::PREVIOUS, Command::Previous, false),
+        (if playing { glyphs::PAUSE } else { glyphs::PLAY }, Command::Toggle, true),
+        (glyphs::NEXT, Command::Next, false),
     ] {
         x += margin;
-        let b = R::new(x, (mid - size / 2.0).round(), size, size);
-        x += size + margin;
+        let b = R::new(x, row, rh, rh);
+        x += rh + margin;
         let over = ui.hovered(b);
         let held = over && ui.held(b);
         let (bg, fg) = if main {
@@ -142,41 +111,74 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
             (if held { Some(ui::HOVER) } else if over { Some(ui::SHADE) } else { None }, ui::FG)
         };
         if let Some(bg) = bg {
-            ui.circle(b.center(), size / 2.0, bg);
+            ui.circle(b.center(), rh / 2.0, bg);
         }
-        ui.icon(glyph, b, 1.75, fg);
+        ui.icon(glyph, b, 1.25, fg);
         if ui.click(b) {
             app.act(Action::Mpd(command));
         }
     }
+    // where the song is and its length, over the time's ends
+    if clock.is_some() {
+        ui.text(Style::Header, &library::clock(at), x0, times, f32::MAX);
+        ui.text_right(Style::Header, &library::clock(length), x0 + cw, times);
+    }
 
-    // the right: the times, and after them repeat one (the song on, over
-    // and over) and repeat (the queue), a switch each
-    let right = x0 + cw;
-    let (sw, sh) = ui::switch_size();
+    // the right: repeat (the queue) and repeat one (the song on, over and
+    // over), side by side, in the accent while on, repeat off from either
     let single = now.is_some_and(|n| n.status.single == SingleMode::Enabled);
     let repeat = now.is_some_and(|n| n.status.repeat);
-    let switches = [(glyphs::REPEAT_ONE, repeat && single), (glyphs::REPEAT, repeat && !single)];
-    let times = clock.map(|c| {
-        [
-            (Style::Header, format!("{} / {}", library::clock(at), library::clock(length))),
-            (Style::Subtitle, format!("{} / {}", library::clock(c.before + at), library::clock(c.whole))),
-        ]
-    });
-    for (i, (glyph, on)) in switches.into_iter().enumerate() {
-        let sy = (rows[i] + (rh - sh) / 2.0).round();
-        if ui.switch(Vector2 { x: right - sw, y: sy }, glyph, on, true) {
-            // repeat one off: no repeat at all; repeat off from repeat one too
-            app.act(Action::Mpd(match (i, on) {
-                (0, false) => Command::RepeatOne,
-                (1, false) => Command::RepeatAll,
-                _ => Command::RepeatOff,
-            }));
+    let repeats = x0 + cw - 2.0 * rh - rem(0.5);
+    let mut x = repeats;
+    for (glyph, on, command) in [(glyphs::REPEAT, repeat && !single, Command::RepeatAll), (glyphs::REPEAT_ONE, repeat && single, Command::RepeatOne)] {
+        if ui.square_button(R::new(x, row, rh, rh), glyph, 1.25, if on { Look::Suggested } else { Look::Plain }, true) {
+            app.act(Action::Mpd(if on { Command::RepeatOff } else { command }));
         }
-        if let Some(times) = &times {
-            let (style, text) = &times[i];
-            ui.text_right(*style, text, right - sw - rem(0.5), text_y(rows[i]));
+        x += rh + rem(0.5);
+    }
+
+    // the left: the song's artist, that opens the page of the artist the
+    // album is filed under, and the album or playlist the queue plays,
+    // with its glyph, that opens its page
+    let glyph = if app.master.playlist().is_some() { glyphs::PLAYLIST } else { glyphs::ALBUM };
+    let place = match app.current().0 {
+        Some(uri) => app.library.as_ref().and_then(|l| l.place(uri).map(|(a, t)| (l.clone(), a, t))),
+        None => app.waiting(),
+    };
+    let artist = match &place {
+        Some((library, a, _)) => Some(library.albums[*a].artist.clone()),
+        None => now.and_then(|n| n.song.as_ref()).and_then(|s| s.song.artists().first().cloned()),
+    };
+    if now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.playlist().is_some() {
+        if ui.square_button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true) {
+            open_source(app);
         }
+    }
+    if let Some(filed) = artist {
+        if ui.square_button(R::new(x0, row, rh, rh), glyphs::ARTIST, 1.25, Look::Plain, true) {
+            app.act(Action::OpenArtist(filed));
+        }
+    }
+
+    // over the time, the song's title centred between where the song is
+    // and its length, the pad from either, the ellipsis where it ends
+    let title = match now.and_then(|n| n.song.as_ref()) {
+        Some(entry) => entry.song.title().unwrap_or(&entry.song.url).to_owned(),
+        // stopped at the end of the list: the list stays, its first track
+        // ready, the way a paused one shows
+        None => match &place {
+            Some((library, a, t)) => library.albums[*a].tracks[*t].title.clone(),
+            None => glyphs::NOTHING.to_owned(),
+        },
+    };
+    let ends = match clock {
+        Some(_) => ui.width(Style::Header, &library::clock(at)).max(ui.width(Style::Header, &library::clock(length))) + rem(PAD),
+        None => 0.0,
+    };
+    let max = cw - 2.0 * ends;
+    if max > 0.0 {
+        let w = ui.width(Style::Header, &title).min(max);
+        ui.text(Style::Header, &title, (x0 + (cw - w) / 2.0).round(), times, max);
     }
 }
 

@@ -114,7 +114,7 @@ impl Style {
     }
 }
 
-/// How a round button looks.
+/// How a button looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Look {
     /// A plain button, light glyph on a light shade.
@@ -556,6 +556,17 @@ impl Ui {
     /// A round button filling `r`, only its glyph at `em` rem; true on a
     /// click.
     pub fn round_button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
+        self.button(r, None, glyph, em, look, sensitive)
+    }
+
+    /// A round button's square sister, its corners rounded half a rem,
+    /// the tabs'.
+    pub fn square_button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
+        self.button(r, Some(rem(0.5)), glyph, em, look, sensitive)
+    }
+
+    /// A button: round without a corner's radius, square with one.
+    fn button(&mut self, r: R, corner: Option<f32>, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
         let over = sensitive && self.hovered(r);
         let held = over && self.held(r);
         let (bg, fg) = match look {
@@ -565,8 +576,10 @@ impl Ui {
             Look::Danger => (if held { Some(BUTTON_HOVER) } else if over { Some(FLAT_HOVER) } else { None }, DESTRUCTIVE),
         };
         self.with_alpha(if sensitive { 1.0 } else { 0.5 }, |ui| {
-            if let Some(bg) = bg {
-                ui.circle(r.center(), r.w / 2.0, bg);
+            match (bg, corner) {
+                (Some(bg), Some(corner)) => ui.rounded(r, corner, bg),
+                (Some(bg), None) => ui.circle(r.center(), r.w / 2.0, bg),
+                (None, _) => {}
             }
             ui.icon(glyph, r, em, fg);
         });
