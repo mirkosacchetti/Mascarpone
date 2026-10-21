@@ -37,6 +37,8 @@ impl Normalize for ChromaDesc {
 
 impl ChromaDesc {
     pub const WINDOW_SIZE: usize = 8192;
+    /// The hop between two frames of the chroma, in samples.
+    pub const HOP: usize = 2205;
     /// The theoretical maximum value for IC1-6 is each value at (1/2)².
     /// The reason is that extract_interval_features computes the product of the
     /// L1-normalized chroma vector (so all of its values are <= 1) by itself.
@@ -71,7 +73,7 @@ impl ChromaDesc {
      * song will greatly improve accuracy.
      */
     pub fn do_(&mut self, signal: &[f32]) -> BlissResult<()> {
-        let mut stft = stft(signal, ChromaDesc::WINDOW_SIZE, 2205);
+        let mut stft = stft(signal, ChromaDesc::WINDOW_SIZE, ChromaDesc::HOP);
         let tuning = estimate_tuning(self.sample_rate, &stft, ChromaDesc::WINDOW_SIZE, 0.01, 12)?;
         let chroma = chroma_stft(
             self.sample_rate,
@@ -82,6 +84,12 @@ impl ChromaDesc {
         )?;
         self.values_chroma = concatenate![Axis(1), self.values_chroma, chroma];
         Ok(())
+    }
+
+    /// The chroma of every frame as `do_` saw them: one row of
+    /// `n_chroma` values per `HOP` samples, each row summing to one.
+    pub fn frames(&self) -> Vec<Vec<f32>> {
+        self.values_chroma.columns().into_iter().map(|c| c.iter().map(|&x| x as f32).collect()).collect()
     }
 
     /**

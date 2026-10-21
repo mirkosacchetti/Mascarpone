@@ -1,22 +1,3 @@
-//! What comes from the net, the way Lollypop does it, without keys of
-//! one's own. Artists' portraits and biographies: MusicBrainz names the
-//! artist and links it to Wikidata, Wikidata to the Wikipedia article, whose
-//! summary gives the biography and the lead picture; TheAudioDB (its
-//! free key is `123`) gives a portrait by MusicBrainz id and a biography
-//! when Wikipedia has none; Deezer a picture when nobody else has one.
-//! Everything found is kept in the database (the words) and in
-//! `~/.cache/mascarpone/artists` (a JPEG with the face) and never asked
-//! twice; what is not found is remembered as such too (a JSON there from
-//! before the database is taken in the first time its artist is asked). An album's cover, when
-//! mpd has none, from Deezer or the Cover Art Archive, written as
-//! `cover.jpg` in the album's folder like the others. MusicBrainz wants
-//! a request a second at most and a User-Agent that says who asks.
-//! For the radio, an artist's links to others: MusicBrainz's relations
-//! (the band's members, collaborations, tributes), Wikidata's
-//! influences (P737, resolved to names and MusicBrainz ids in one more
-//! call), Deezer's related artists; all kept in the database by the
-//! radio thread.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,12 +10,10 @@ use crate::covers;
 
 const USER_AGENT: &str = "mascarpone/0.1 (https://random.cards)";
 
-/// What the net said about an artist, as kept on disk.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Info {
     pub bio: Option<String>,
     pub wikipedia: Option<String>,
-    /// The portrait file is there.
     pub portrait: bool,
 }
 
@@ -50,7 +29,6 @@ fn info_path(name: &str) -> PathBuf {
     cache_dir().join(format!("{}.json", covers::hash(name)))
 }
 
-/// The net's throttle: MusicBrainz's last call, so the next waits.
 pub struct Net {
     client: reqwest::Client,
     musicbrainz: Mutex<Instant>,
@@ -66,8 +44,6 @@ impl Net {
         Arc::new(Net { client, musicbrainz: Mutex::new(Instant::now() - Duration::from_secs(2)) })
     }
 
-    /// A call to MusicBrainz, a second after the last; a 503 (busy, or
-    /// too many calls) is tried again a few times, after a wait.
     async fn musicbrainz(&self, url: &str, query: &[(&str, String)]) -> Result<serde_json::Value> {
         let mut last = self.musicbrainz.lock().await;
         for attempt in 0.. {
@@ -91,7 +67,6 @@ impl Net {
     }
 }
 
-/// Forgets what is kept on an artist, for a new try.
 pub fn forget(db: &crate::db::Shared, name: &str) {
     if let Err(e) = db.lock().unwrap().forget_info(name) {
         eprintln!("artist {name}: {e}");
@@ -100,8 +75,6 @@ pub fn forget(db: &crate::db::Shared, name: &str) {
     let _ = std::fs::remove_file(portrait_path(name));
 }
 
-/// The artist's info, from the database or from the net (and then into
-/// the database). A net failure leaves nothing, so it is tried again later.
 pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
     let mbid = {
         let db = db.lock().unwrap();
@@ -112,7 +85,6 @@ pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
         }
         db.artist_mbid(name).unwrap_or_default()
     };
-    // the file from before the database: taken in, and gone
     let path = info_path(name);
     let info = match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Info>(&b).ok()) {
         Some(info) => {
@@ -133,8 +105,6 @@ pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
     info
 }
 
-/// The artist's MusicBrainz id by name: the first found, when it is a
-/// close match.
 async fn musicbrainz_id(net: &Net, name: &str) -> Result<Option<String>> {
     let found = net
         .musicbrainz("https://musicbrainz.org/ws/2/artist/", &[("query", format!("artist:\"{name}\"")), ("fmt", "json".into()), ("limit", "1".into())])
@@ -142,20 +112,16 @@ async fn musicbrainz_id(net: &Net, name: &str) -> Result<Option<String>> {
     Ok(found["artists"].get(0).filter(|a| a["score"].as_i64().unwrap_or(0) >= 85).and_then(|a| a["id"].as_str()).map(str::to_owned))
 }
 
-/// The artist's info: by MusicBrainz id when the tags gave one, else
-/// by name.
 async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
     let mut info = Info::default();
     let mut image_url: Option<String> = None;
     let mut audiodb_bio: Option<String> = None;
 
-    // MusicBrainz: the artist, then its links
     let id = match mbid {
         Some(id) => Some(id.to_owned()),
         None => musicbrainz_id(net, name).await?,
     };
     if let Some(id) = id {
-        // TheAudioDB by MusicBrainz id: a portrait, and words in reserve
         if let Ok(found) = net.json(&format!("https://www.theaudiodb.com/api/v1/json/123/artist-mb.php?i={id}")).await {
             if let Some(a) = found["artists"].get(0) {
                 image_url = a["strArtistThumb"].as_str().filter(|u| !u.is_empty()).map(str::to_owned);
@@ -164,7 +130,7 @@ async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
         }
         let full = net.musicbrainz(&format!("https://musicbrainz.org/ws/2/artist/{id}"), &[("inc", "url-rels".into()), ("fmt", "json".into())]).await?;
         let mut wikidata: Option<String> = None;
-        let mut wikipedia: Option<(String, String)> = None; // (lang, title)
+        let mut wikipedia: Option<(String, String)> = None;
         for rel in full["relations"].as_array().into_iter().flatten() {
             let url = rel["url"]["resource"].as_str().unwrap_or_default();
             match rel["type"].as_str().unwrap_or_default() {
@@ -173,7 +139,6 @@ async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
                 _ => {}
             }
         }
-        // Wikidata: the article, English first
         if wikipedia.is_none() {
             if let Some(q) = &wikidata {
                 let entity = net.json(&format!("https://www.wikidata.org/wiki/Special:EntityData/{q}.json")).await?;
@@ -186,7 +151,6 @@ async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
                 }
             }
         }
-        // Wikipedia: the summary, the words and the picture
         if let Some((lang, title)) = wikipedia {
             let title = title.replace(' ', "_");
             let url = format!("https://{lang}.wikipedia.org/api/rest_v1/page/summary/{}", urlencode(&title));
@@ -203,7 +167,6 @@ async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
         info.bio = audiodb_bio;
     }
 
-    // Deezer for a face when Wikipedia has none
     if image_url.is_none() {
         let found = net.client.get("https://api.deezer.com/search/artist").query(&[("q", name), ("limit", "1")]).send().await?.error_for_status()?.json::<serde_json::Value>().await?;
         if let Some(first) = found["data"].get(0) {
@@ -224,17 +187,12 @@ async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
     Ok(info)
 }
 
-/// What the net says an artist is linked to, and their ids there; for
-/// a collaboration, its members from the tags, named by MusicBrainz.
 pub struct Links {
     pub mbid: Option<String>,
     pub deezer: Option<i64>,
     pub links: Vec<crate::db::Link>,
 }
 
-/// An artist's links: MusicBrainz's artist relations and the Wikidata
-/// id, Wikidata's influences, Deezer's related artists. An error only
-/// when MusicBrainz could not be asked; the rest missing is just missing.
 pub async fn links(net: &Net, name: &str, mbids: &[String]) -> Result<Links> {
     let mut links = Links { mbid: None, deezer: None, links: Vec::new() };
     let link = |other: &str, other_mbid: Option<&str>, other_deezer: Option<i64>, kind: &str, source: &str| crate::db::Link { other: other.to_owned(), other_mbid: other_mbid.map(str::to_owned), other_deezer, kind: kind.to_owned(), source: source.to_owned() };
@@ -265,8 +223,6 @@ pub async fn links(net: &Net, name: &str, mbids: &[String]) -> Result<Links> {
                 wikidata = rel["url"]["resource"].as_str().and_then(|u| u.rsplit('/').next()).map(str::to_owned);
             }
         }
-        // Wikidata: whom the artist was influenced by, then those
-        // entities' names and MusicBrainz ids in one call
         if let Some(q) = wikidata {
             if let Ok(entity) = net.json(&format!("https://www.wikidata.org/wiki/Special:EntityData/{q}.json")).await {
                 let ids: Vec<String> = entity["entities"][&q]["claims"]["P737"]
@@ -290,7 +246,6 @@ pub async fn links(net: &Net, name: &str, mbids: &[String]) -> Result<Links> {
             }
         }
     }
-    // Deezer: the artist, then the related ones
     let found = net.client.get("https://api.deezer.com/search/artist").query(&[("q", name), ("limit", "1")]).send().await?.error_for_status()?.json::<serde_json::Value>().await?;
     let deezer = found["data"].get(0).filter(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))).and_then(|a| a["id"].as_i64());
     if let Some(id) = deezer {
@@ -306,7 +261,6 @@ pub async fn links(net: &Net, name: &str, mbids: &[String]) -> Result<Links> {
     Ok(links)
 }
 
-/// Language and title of a Wikipedia article url.
 fn wiki_parts(url: &str) -> Option<(String, String)> {
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     let (host, path) = rest.split_once('/')?;
@@ -345,8 +299,6 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).replace('_', " ")
 }
 
-/// A title for matching: lowercase, without what brackets add ("(2011
-/// reissue)", "[Deluxe Edition]"), spaces squeezed.
 fn plain(title: &str) -> String {
     let mut out = String::new();
     let mut depth = 0;
@@ -361,18 +313,10 @@ fn plain(title: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A picture's address from Deezer, unless it is Deezer's own stand-in:
-/// for an artist or an album without a picture it still gives one, with
-/// an empty id (`.../images/artist//1000x1000-...`), a grey person or
-/// disc on white.
 fn deezer_image(url: &serde_json::Value) -> Option<String> {
     url.as_str().filter(|u| !u.is_empty() && !u.contains("/images/artist//") && !u.contains("/images/cover//")).map(str::to_owned)
 }
 
-/// An album's cover from the net, as the bytes of a JPEG: Deezer's
-/// (1000 px) when a match has the album's title (edition notes aside)
-/// and artist, else the Cover Art Archive's front (500 px) of the
-/// release group MusicBrainz has under that title and artist.
 pub async fn album_cover(net: &Net, artist: &str, album: &str) -> Result<Option<Vec<u8>>> {
     let wanted = plain(album);
     let found = net
@@ -404,7 +348,6 @@ pub async fn album_cover(net: &Net, artist: &str, album: &str) -> Result<Option<
         return Ok(None);
     }
     let bytes = response.bytes().await?.to_vec();
-    // whatever came, a JPEG goes in the folder
     let jpeg = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let image = image::load_from_memory(&bytes)?.into_rgb8();
         let mut out = std::io::Cursor::new(Vec::new());

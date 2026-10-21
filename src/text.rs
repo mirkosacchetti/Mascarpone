@@ -1,11 +1,3 @@
-//! The words on screen: the font (lintel's, JetBrainsMono Nerd Font
-//! Propo, found by fontconfig), drawn by raylib from atlases made at the
-//! exact pixel size of each use, so nothing is scaled. A face holds the
-//! characters the library writes with: whatever turns up that a face has
-//! not drawn yet (a new library, a biography, what is typed) is noted and
-//! the faces are made again at the next frame. The icons have faces of
-//! their own, only the glyphs, drawn centred by their ink.
-
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{c_int, CString};
@@ -23,29 +15,22 @@ pub enum Weight {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Set {
-    /// The text and the glyphs inside it.
     Text,
-    /// Only the glyphs.
     Icons,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
     weight: Weight,
-    /// The em in pixels.
     px: u32,
     set: Set,
 }
 
-/// The font at one size.
 pub struct Face {
     font: rl::Font,
     index: HashMap<u32, usize>,
-    /// The em, in pixels.
     pub px: f32,
-    /// A line, ascent to descent, in pixels.
     pub line: f32,
-    /// The characters asked of this face that it lacks.
     missing: Option<Rc<RefCell<BTreeSet<u32>>>>,
 }
 
@@ -59,7 +44,6 @@ impl Face {
             }
             return None;
         };
-        // SAFETY: `i` < glyphCount, the arrays raylib made with the font
         unsafe { Some((*self.font.glyphs.add(i), *self.font.recs.add(i))) }
     }
 
@@ -75,7 +59,6 @@ impl Face {
         s.chars().map(|c| self.advance(c)).sum()
     }
 
-    /// Draws `s` with its line's top at `y`; returns the width drawn.
     pub fn draw(&self, s: &str, x: f32, y: f32, color: Color) -> f32 {
         let (x0, y) = (x.round(), y.round());
         let mut x = x0;
@@ -92,7 +75,6 @@ impl Face {
         x - x0
     }
 
-    /// Draws one glyph with the middle of its ink at `center`.
     pub fn draw_centered(&self, glyph: &str, center: Vector2, color: Color) {
         let Some(c) = glyph.chars().next() else { return };
         let Some((_, r)) = self.glyph(c) else { return };
@@ -102,7 +84,6 @@ impl Face {
         unsafe { rl::DrawTexturePro(self.font.texture, src, dst, Vector2::default(), 0.0, color) };
     }
 
-    /// `s` cut to `max` pixels, an ellipsis at the end when cut.
     pub fn ellipsize<'a>(&self, s: &'a str, max: f32) -> std::borrow::Cow<'a, str> {
         if self.width(s) <= max {
             return s.into();
@@ -120,9 +101,6 @@ impl Face {
         format!("{}…", s[..end].trim_end()).into()
     }
 
-    /// `s` in lines of `max` pixels at most, broken between words, a word
-    /// longer than a line between its characters; no more than `lines`
-    /// (the last one ellipsized), any number with 0.
     pub fn wrap(&self, s: &str, max: f32, lines: usize) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for paragraph in s.split('\n') {
@@ -146,7 +124,6 @@ impl Face {
                     w = ww;
                     continue;
                 }
-                // a word wider than the line, a piece a line
                 for c in word.chars() {
                     let cw = self.advance(c);
                     if w + cw > max && !line.is_empty() {
@@ -168,15 +145,11 @@ impl Face {
     }
 }
 
-/// The font files, the characters to draw, the faces made.
 pub struct Fonts {
-    /// Regular and bold, and the line's height per em of each.
     files: [(Vec<u8>, f32); 2],
     text: RefCell<BTreeSet<u32>>,
     missing: Rc<RefCell<BTreeSet<u32>>>,
     faces: RefCell<HashMap<Key, Rc<Face>>>,
-    /// The em the faces were made for: a new one (a zoom, another
-    /// screen) makes them again.
     made_for: Cell<f32>,
 }
 
@@ -195,7 +168,6 @@ impl Fonts {
         }
     }
 
-    /// The characters of `s` noted, for the next faces.
     pub fn learn(&self, s: &str) {
         let text = self.text.borrow();
         let mut missing = self.missing.borrow_mut();
@@ -206,9 +178,6 @@ impl Fonts {
         }
     }
 
-    /// At the start of a frame, before anything is drawn: the faces made
-    /// again when characters turned up or the size changed. The old ones
-    /// are dropped here, where no draw of the last frame still waits.
     pub fn begin_frame(&self) {
         let px = crate::size::px();
         if (px - self.made_for.get()).abs() > 0.01 {
@@ -234,12 +203,10 @@ impl Fonts {
         }
     }
 
-    /// The text face of `weight` at `rem` rem.
     pub fn face(&self, weight: Weight, rem: f32) -> Rc<Face> {
         self.get(Key { weight, px: (rem * crate::size::px()).round() as u32, set: Set::Text })
     }
 
-    /// The glyphs at an em of `px` pixels.
     pub fn icons(&self, px: f32) -> Rc<Face> {
         self.get(Key { weight: Weight::Regular, px: px.round().max(1.0) as u32, set: Set::Icons })
     }
@@ -258,7 +225,6 @@ impl Fonts {
         let font = unsafe { rl::LoadFontFromMemory(ext.as_ptr(), data.as_ptr(), data.len() as c_int, size, codepoints.as_ptr(), codepoints.len() as c_int) };
         let mut index = HashMap::new();
         for i in 0..font.glyphCount.max(0) as usize {
-            // SAFETY: glyphCount entries
             let g = unsafe { *font.glyphs.add(i) };
             index.insert(g.value as u32, i);
         }
@@ -274,8 +240,6 @@ impl Fonts {
     }
 }
 
-/// The font file of a weight, as fontconfig finds it, and its line's
-/// height per em (ascent and descent, as raylib sizes it).
 fn load(weight: Weight) -> (Vec<u8>, f32) {
     let style = match weight {
         Weight::Regular => "Regular",
@@ -292,7 +256,6 @@ fn load(weight: Weight) -> (Vec<u8>, f32) {
     (data, ratio)
 }
 
-/// (ascent - descent) / units per em, from the `hhea` and `head` tables.
 fn line_per_em(ttf: &[u8]) -> Option<f32> {
     let u16_at = |at: usize| -> Option<u16> { Some(u16::from_be_bytes(ttf.get(at..at + 2)?.try_into().ok()?)) };
     let u32_at = |at: usize| -> Option<u32> { Some(u32::from_be_bytes(ttf.get(at..at + 4)?.try_into().ok()?)) };

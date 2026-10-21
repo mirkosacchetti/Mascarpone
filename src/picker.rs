@@ -1,18 +1,3 @@
-//! The picker: lintel's launcher with music instead of apps. On Ctrl+F
-//! what is on screen: the tab's albums, artists or playlists; on the
-//! Queue tab albums and tracks to append; on an artist's page their
-//! albums and tracks (a track opens its album with the track selected,
-//! so Enter again plays it); on an album's or a playlist's page its
-//! tracks (Enter selects the row there). On `/` everything. On `a` over
-//! a track, the playlists to add it to. On Ctrl+K the commands, each with
-//! its keys in blue, done when picked. Typing filters (fuzzy, the name
-//! first, then the detail), Up/Down/Tab and Ctrl+n/p/k/l move, Enter
-//! opens the page, Escape closes (the keys are the configuration's).
-//! Eight rows at a time, the selection scrolls them.
-//!
-//! The other dialogs live here too, the picker's look: the name to save
-//! the queue as, and the question before a playlist is deleted.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,50 +13,31 @@ use crate::size::rem;
 use crate::ui::{self, Entry, Style, Ui, R};
 
 const ROWS: usize = 8;
-/// The dialog's width, in rem.
 const WIDTH: f32 = 38.0;
 
-/// What the picker lists.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// The tabs' lists.
     Albums,
     Artists,
     Playlists,
-    /// An artist's albums and tracks together.
     Artist(usize),
-    /// The playlists, to add this track to one, or to a new one named
-    /// by what is typed.
     AddTo(String),
-    /// Albums, and every track once something is typed, to append to
-    /// the queue (on the Queue tab).
     ToQueue,
-    /// The rows of the tracks page on screen (an album, a playlist):
-    /// Enter selects the row there, so a second Enter plays it.
     Tracks,
-    /// The commands, each with its keys: picked, done.
     Commands,
-    /// Everything, from `/`: albums, artists, playlists, and every track
-    /// once something is typed. Enter opens the page; on a track, its
-    /// album's with the track selected, so a second Enter plays it.
     All,
 }
 
-/// What a line opens: indexes into the library.
 #[derive(Clone, Copy)]
 enum Target {
     Album(usize),
     Artist(usize),
     Playlist(usize),
-    /// The album's page with the track selected.
     Track(usize, usize),
-    /// A row of the tracks page on screen.
     Row(usize),
     Command(crate::config::Shortcut),
 }
 
-/// One line: the name, what goes after it in blue, where it leads. A
-/// track among the albums shows only once something is typed.
 struct Line {
     name: String,
     detail: String,
@@ -79,8 +45,6 @@ struct Line {
     typed_only: bool,
 }
 
-/// The line to make a new playlist, shown under the matches of `AddTo`
-/// when the text names none.
 const NEW: usize = usize::MAX;
 
 pub struct Picker {
@@ -90,8 +54,6 @@ pub struct Picker {
     lines: Vec<Line>,
     entry: Entry,
     matcher: SkimMatcherV2,
-    /// Indexes into `lines` that match, best first; the selected one; the
-    /// first row shown.
     shown: Vec<usize>,
     selected: usize,
     top: usize,
@@ -99,7 +61,6 @@ pub struct Picker {
 
 impl Picker {
     pub fn open(app: &App, kind: Kind) -> Option<Picker> {
-        // the commands need no library
         let library = match (app.library.clone(), &kind) {
             (Some(l), _) => l,
             (None, Kind::Commands) => Arc::new(Library::default()),
@@ -108,7 +69,6 @@ impl Picker {
         let album_lines = || library.albums.iter().enumerate().map(|(index, a)| Line { name: a.title.clone(), detail: a.artist.clone(), target: Target::Album(index), typed_only: false });
         let artist_lines = || library.artists.iter().enumerate().map(|(index, a)| Line { name: a.name.clone(), detail: count(a.albums.len(), glyphs::ALBUM), target: Target::Artist(index), typed_only: false });
         let playlist_lines = || -> Vec<Line> { library.playlists().iter().enumerate().map(|(index, p)| Line { name: p.name.clone(), detail: count(p.entries.len(), glyphs::TRACK), target: Target::Playlist(index), typed_only: false }).collect() };
-        // every track, shown once something is typed
         let track_lines = || {
             library.albums.iter().enumerate().flat_map(|(a, album)| {
                 album.tracks.iter().enumerate().map(move |(t, track)| Line { name: track.title.clone(), detail: format!("{}  ·  {}", track.artist, album.title), target: Target::Track(a, t), typed_only: true })
@@ -157,9 +117,6 @@ impl Picker {
         Some(picker)
     }
 
-    /// The lines that match the text, best first: the name counts most,
-    /// and more when the text is its start or a word's start; the detail
-    /// next. Empty text lists the library in its order.
     fn refilter(&mut self) {
         let text = self.entry.text.to_lowercase();
         let text = text.trim();
@@ -171,7 +128,6 @@ impl Picker {
                 }
                 continue;
             }
-            // a track weighs less than an album of the same name
             let weight = if line.typed_only { 40 } else { 100 };
             let name = self.matcher.fuzzy_match(&line.name, text).map(|s| s + weight + start_bonus(&line.name, text));
             let detail = self.matcher.fuzzy_match(&line.detail, text).map(|s| s + weight / 2 + start_bonus(&line.detail, text) / 2);
@@ -179,7 +135,6 @@ impl Picker {
                 scored.push((best, i));
             }
         }
-        // stable: equal scores keep the library's order
         scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         self.shown = scored.into_iter().map(|(_, i)| i).collect();
         if matches!(self.kind, Kind::AddTo(_)) && !text.is_empty() && !self.lines.iter().any(|l| l.name.to_lowercase() == text) {
@@ -202,7 +157,6 @@ impl Picker {
         }
     }
 
-    /// The selected line done; false when nothing is to be done.
     fn pick(&self, app: &App) -> bool {
         let Some(&i) = self.shown.get(self.selected) else { return false };
         if let Kind::AddTo(uri) = &self.kind {
@@ -245,10 +199,8 @@ impl Picker {
         true
     }
 
-    /// A key; false when the picker closes.
     fn key(&mut self, app: &App, input: &Input) -> bool {
         use crate::config::Shortcut as S;
-        // characters are the entry's: only keys move and close
         if let Input::Key { code, mods } = *input {
             let keys = [S::PickerOpen, S::PickerClose, S::PickerNext, S::PickerPrevious, S::PickerPageDown, S::PickerPageUp];
             match crate::config::get().which(&keys, input) {
@@ -258,7 +210,6 @@ impl Picker {
                 Some(S::PickerPrevious) => self.step(-1),
                 Some(S::PickerPageDown) => self.step(5),
                 Some(S::PickerPageUp) => self.step(-5),
-                // not the window's tab switch under the dialog
                 _ if mods & rl::MOD_CONTROL != 0 && code == rl::KEY_TAB => {}
                 _ => return self.type_in(input),
             }
@@ -267,7 +218,6 @@ impl Picker {
         self.type_in(input)
     }
 
-    /// A key or a character for the entry: the lines filtered again.
     fn type_in(&mut self, input: &Input) -> bool {
         let before = self.entry.text.clone();
         if self.entry.input(input) && self.entry.text != before {
@@ -313,7 +263,6 @@ impl Picker {
                 let line = &self.lines[i];
                 match line.target {
                     Target::Album(a) | Target::Track(a, _) => {
-                        // what the line is, a disc or a note, then the cover
                         mark(ui, if matches!(line.target, Target::Track(..)) { glyphs::TRACK } else { glyphs::ALBUM }, &mut x);
                         let album = &self.library.albums[a];
                         let pr = R::new(x, (mid - pic / 2.0).round(), pic, pic);
@@ -354,13 +303,11 @@ impl Picker {
         if picked && self.pick(app) {
             return false;
         }
-        // a click outside closes it
         ui.click(r);
         !ui.click(R::new(0.0, 0.0, ui.w, ui.h))
     }
 }
 
-/// The text as the name's start, or a word's start in it.
 fn start_bonus(name: &str, text: &str) -> i64 {
     let name = name.to_lowercase();
     if name.starts_with(text) {
@@ -372,8 +319,6 @@ fn start_bonus(name: &str, text: &str) -> i64 {
     }
 }
 
-/// A dialog's head: the prompt in the accent, the entry after it with
-/// its caret.
 fn head(ui: &mut Ui, r: R, prompt: &str, entry: &Entry, placeholder: &str) {
     let lh = ui.line(Style::Header);
     let y = r.y + rem(0.5);
@@ -383,7 +328,6 @@ fn head(ui: &mut Ui, r: R, prompt: &str, entry: &Entry, placeholder: &str) {
     let room = r.right() - rem(0.5) - ex;
     let face = ui.face(Style::Header);
     let caret = face.width(&entry.text[..entry.caret]);
-    // the text slides left when the caret would go past the end
     let shift = (caret - room).max(0.0);
     let clip = R::new(ex, r.y, room.max(0.0), r.h);
     if entry.text.is_empty() && !placeholder.is_empty() {
@@ -397,18 +341,13 @@ fn head(ui: &mut Ui, r: R, prompt: &str, entry: &Entry, placeholder: &str) {
     ui.rect(R::new((ex + caret - shift).round(), y, cw, lh), ui::FG);
 }
 
-/// A dialog up over the window.
 pub enum Modal {
     Picker(Box<Picker>),
-    /// The name to save the queue as.
     Name(Entry),
-    /// Asked before a playlist is deleted: its file, its name.
     Delete(PathBuf, String),
 }
 
 impl Modal {
-    /// The name to save the queue as, with a name proposed (the radio's),
-    /// the caret at its end.
     pub fn name(proposed: Option<String>) -> Modal {
         let text = proposed.unwrap_or_default();
         Modal::Name(Entry { caret: text.len(), text })
@@ -418,7 +357,6 @@ impl Modal {
         Modal::Delete(path, name)
     }
 
-    /// A key for the dialog; false when it closes.
     pub fn key(&mut self, app: &App, input: &Input) -> bool {
         match self {
             Modal::Picker(p) => p.key(app, input),
@@ -437,12 +375,10 @@ impl Modal {
                     true
                 }
             },
-            // open is Cancel, the default
             Modal::Delete(..) => crate::config::get().which(&[crate::config::Shortcut::PickerClose, crate::config::Shortcut::PickerOpen], input).is_none(),
         }
     }
 
-    /// Drawn over the dimmed window; false when it closes.
     pub fn draw(&mut self, app: &App, ui: &mut Ui) -> bool {
         match self {
             Modal::Picker(p) => p.draw(app, ui),

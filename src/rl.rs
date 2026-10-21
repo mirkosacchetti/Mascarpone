@@ -1,11 +1,3 @@
-//! raylib, the little of it Mascarpone uses, and a few calls to the GLFW
-//! inside it: waiting for events (the window draws only when something
-//! changed), waking that wait from another thread, and the input
-//! callbacks, chained before raylib's so that no key, character or click
-//! is lost between two frames. On Wayland, a frame callback on every
-//! frame drawn: until the compositor has shown it, nothing more is drawn,
-//! so a window out of sight (the scratchpad hidden) draws nothing at all.
-
 #![allow(non_snake_case, dead_code)]
 
 use std::cell::{Cell, RefCell};
@@ -127,7 +119,6 @@ extern "C" {
     pub fn SetTraceLogLevel(level: c_int);
     pub fn InitWindow(width: c_int, height: c_int, title: *const c_char);
     pub fn CloseWindow();
-    pub fn WindowShouldClose() -> bool;
     pub fn IsWindowFocused() -> bool;
     pub fn SetExitKey(key: c_int);
     pub fn SetTargetFPS(fps: c_int);
@@ -179,8 +170,8 @@ extern "C" {
     fn glfwSetCharCallback(window: *mut c_void, f: Option<CharFn>) -> Option<CharFn>;
     fn glfwSetMouseButtonCallback(window: *mut c_void, f: Option<ButtonFn>) -> Option<ButtonFn>;
     fn glfwSetScrollCallback(window: *mut c_void, f: Option<ScrollFn>) -> Option<ScrollFn>;
+    fn glfwSetWindowCloseCallback(window: *mut c_void, f: Option<CloseFn>) -> Option<CloseFn>;
 
-    // GLFW's Wayland patched (build.rs): the scroll's source, its stops
     static mascarpone_scroll_continuous: c_int;
     static mascarpone_scroll_stops: c_uint;
 }
@@ -189,20 +180,15 @@ type KeyFn = extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int);
 type CharFn = extern "C" fn(*mut c_void, c_uint);
 type ButtonFn = extern "C" fn(*mut c_void, c_int, c_int, c_int);
 type ScrollFn = extern "C" fn(*mut c_void, f64, f64);
+type CloseFn = extern "C" fn(*mut c_void);
 
-/// What came in from the keyboard and the mouse, in order.
 #[derive(Debug, Clone, Copy)]
 pub enum Input {
-    /// A key pressed or repeated, with the modifiers held.
     Key { code: i32, mods: i32 },
-    /// A character typed (no Ctrl or Alt held).
     Char(char),
     Press(i32),
     Release(i32),
-    /// A scroll, down negative: a wheel's notches, or a touchpad's (or a
-    /// trackpoint's) pixels in tenths.
     Scroll { y: f32, wheel: bool },
-    /// The touchpad's fingers lifted after a scroll.
     ScrollStop,
 }
 
@@ -211,15 +197,15 @@ struct Chain {
     char: Option<CharFn>,
     button: Option<ButtonFn>,
     scroll: Option<ScrollFn>,
+    close: Option<CloseFn>,
 }
 
-static mut CHAIN: Chain = Chain { key: None, char: None, button: None, scroll: None };
-/// The window is up: a wake from another thread may reach GLFW.
+static mut CHAIN: Chain = Chain { key: None, char: None, button: None, scroll: None, close: None };
 static ALIVE: AtomicBool = AtomicBool::new(false);
+static CLOSING: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static INPUT: RefCell<Vec<Input>> = const { RefCell::new(Vec::new()) };
-    /// The scroll stops seen so far.
     static STOPS: Cell<c_uint> = const { Cell::new(0) };
 }
 
@@ -231,7 +217,6 @@ extern "C" fn on_key(window: *mut c_void, key: c_int, scancode: c_int, action: c
     if action == GLFW_PRESS || action == GLFW_REPEAT {
         push(Input::Key { code: key, mods });
     }
-    // SAFETY: written once in `open`, before GLFW calls back
     if let Some(f) = unsafe { CHAIN.key } {
         f(window, key, scancode, action, mods);
     }
@@ -254,7 +239,6 @@ extern "C" fn on_button(window: *mut c_void, button: c_int, action: c_int, mods:
 }
 
 extern "C" fn on_scroll(window: *mut c_void, x: f64, y: f64) {
-    // SAFETY: written by GLFW on this thread, before it calls back
     let wheel = unsafe { mascarpone_scroll_continuous } == 0;
     push(Input::Scroll { y: y as f32, wheel });
     if let Some(f) = unsafe { CHAIN.scroll } {
@@ -262,26 +246,39 @@ extern "C" fn on_scroll(window: *mut c_void, x: f64, y: f64) {
     }
 }
 
-/// Opens the window, its input chained to Mascarpone's queue.
+/// The compositor asked the window to close. raylib's WindowShouldClose
+/// learns of it only at the end of the next drawn frame, in
+/// PollInputEvents, while an idle loop sleeping in `wait` is woken by the
+/// request and would go back to sleep: the flag is kept here, as the
+/// request arrives.
+extern "C" fn on_close(window: *mut c_void) {
+    CLOSING.store(true, Ordering::SeqCst);
+    if let Some(f) = unsafe { CHAIN.close } {
+        f(window);
+    }
+}
+
+/// Whether the window was asked to close, by the compositor or a key.
+pub fn closing() -> bool {
+    CLOSING.load(Ordering::SeqCst)
+}
+
 pub fn open(width: i32, height: i32, title: &str) {
     let title = CString::new(title).unwrap();
     unsafe {
         SetTraceLogLevel(LOG_ERROR);
-        // no libdecor (it would load a toolkit to draw a frame): sway frames the
-        // window itself, and the scratchpad wants none
         glfwInitHint(GLFW_WAYLAND_LIBDECOR, GLFW_WAYLAND_DISABLE_LIBDECOR);
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
         InitWindow(width, height, title.as_ptr());
         SetExitKey(0);
         SetTargetFPS(60);
-        // raylib's window handle is the native one: GLFW's is the window
-        // whose context raylib made current
         let window = glfwGetCurrentContext();
         CHAIN = Chain {
             key: glfwSetKeyCallback(window, Some(on_key)),
             char: glfwSetCharCallback(window, Some(on_char)),
             button: glfwSetMouseButtonCallback(window, Some(on_button)),
             scroll: glfwSetScrollCallback(window, Some(on_scroll)),
+            close: glfwSetWindowCloseCallback(window, Some(on_close)),
         };
         if glfwGetPlatform() == GLFW_PLATFORM_WAYLAND {
             WAYLAND.with(|w| *w.borrow_mut() = Wayland::new(glfwGetWaylandWindow(window)));
@@ -290,8 +287,6 @@ pub fn open(width: i32, height: i32, title: &str) {
     ALIVE.store(true, Ordering::SeqCst);
 }
 
-/// The few calls of libwayland-client a frame callback takes, from the
-/// copy GLFW has loaded: nothing more linked.
 struct Wayland {
     surface: *mut c_void,
     marshal: MarshalFn,
@@ -332,7 +327,6 @@ impl Wayland {
 
 thread_local! {
     static WAYLAND: RefCell<Option<Wayland>> = const { RefCell::new(None) };
-    /// The last frame drawn is not shown yet, since then.
     static UNSHOWN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
@@ -346,8 +340,6 @@ struct CallbackListener {
 static LISTENER: CallbackListener = CallbackListener { done: on_shown };
 
 extern "C" fn on_shown(_data: *mut c_void, callback: *mut c_void, _time: u32) {
-    // GLFW dispatches Wayland's events on the main thread, the one that
-    // asked
     UNSHOWN.with(|u| u.set(None));
     WAYLAND.with(|w| {
         if let Some(w) = &*w.borrow() {
@@ -356,8 +348,6 @@ extern "C" fn on_shown(_data: *mut c_void, callback: *mut c_void, _time: u32) {
     });
 }
 
-/// Asks to be told when the frame about to be drawn is shown: before it
-/// is swapped, so that the request goes with it.
 pub fn ask_shown() {
     if UNSHOWN.with(Cell::get).is_some() {
         return;
@@ -375,9 +365,6 @@ pub fn ask_shown() {
     });
 }
 
-/// Whether a frame may be drawn: the last one has been shown. One that
-/// never is (a compositor that forgets) holds the window two seconds at
-/// most once there is input.
 pub fn may_draw() -> bool {
     match UNSHOWN.with(Cell::get) {
         None => true,
@@ -394,14 +381,11 @@ pub fn close() {
     unsafe { CloseWindow() };
 }
 
-/// Keys, characters or clicks waiting for the next frame.
 pub fn input_waiting() -> bool {
     INPUT.with(|i| !i.borrow().is_empty())
 }
 
-/// What came in since the last call.
 pub fn take_input() -> Vec<Input> {
-    // SAFETY: written by GLFW on this thread, in its event handling
     let stops = unsafe { mascarpone_scroll_stops };
     if STOPS.with(|s| s.replace(stops)) != stops {
         push(Input::ScrollStop);
@@ -409,21 +393,16 @@ pub fn take_input() -> Vec<Input> {
     INPUT.with(|i| std::mem::take(&mut *i.borrow_mut()))
 }
 
-/// Sleeps until an event or the timeout.
 pub fn wait(seconds: f64) {
     unsafe { glfwWaitEventsTimeout(seconds.max(0.0)) };
 }
 
-/// Wakes the window's wait: from any thread.
 pub fn wake() {
     if ALIVE.load(Ordering::SeqCst) {
         unsafe { glfwPostEmptyEvent() };
     }
 }
 
-/// The character a printable key writes on the keyboard's layout,
-/// without modifiers: how Ctrl+F or Ctrl++ are told apart whatever the
-/// layout.
 pub fn key_char(code: i32) -> Option<char> {
     let name = unsafe { glfwGetKeyName(code, 0) };
     if name.is_null() {
@@ -443,8 +422,6 @@ pub fn clipboard() -> String {
     unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
 }
 
-/// A texture from RGBA pixels, mipmapped for the smaller sizes it is
-/// shown at.
 pub fn texture(rgba: &[u8], width: u32, height: u32) -> Texture {
     let image = Image { data: rgba.as_ptr() as *mut c_void, width: width as c_int, height: height as c_int, mipmaps: 1, format: PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     unsafe {

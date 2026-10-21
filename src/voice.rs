@@ -1,29 +1,13 @@
-//! Whether a track has a voice: YAMNet (`vendor/yamnet`) hears the
-//! sound in frames of a second and gives each an embedding, and
-//! Essentia's voice/instrumental head (`vendor/essentia-models`) says
-//! of each embedding how likely a voice is. Both in ONNX, run by tract,
-//! both built into the binary. A track's voice is the mean of its
-//! frames' likelihoods, and how many of its frames are likelier voice
-//! than not; it has a voice when the mean is over a half. The sound is
-//! the one bliss decodes, taken down to 16 kHz by interpolation (enough
-//! for a classifier), ten seconds at a time.
-
 use anyhow::{anyhow, Result};
 use tract_onnx::prelude::*;
 
-/// The rate YAMNet hears at.
 const RATE: usize = 16000;
-/// Ten seconds at a time: with a fixed length the graph's framing folds
-/// to constants, which tract wants.
 const WINDOW: usize = 10 * RATE;
-/// YAMNet's frame and hop, in samples, and the frames it makes of a window.
 const FRAME: usize = 15600;
 const HOP: usize = 7680;
 const PER_WINDOW: usize = 20;
 const EMBEDDING: usize = 1024;
 
-/// A track's voice: the mean likelihood over its frames, and the share
-/// of frames likelier voice than not.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Voice {
     pub mean: f32,
@@ -56,7 +40,6 @@ impl Models {
         Ok(Models { yamnet, head })
     }
 
-    /// The voice in a sound of `rate` Hz, mono.
     pub fn hear(&self, samples: &[f32], rate: usize) -> Result<Voice> {
         let sound = resample(samples, rate);
         let mut sum = 0.0;
@@ -76,7 +59,6 @@ impl Models {
             let embeddings = out.get(1).ok_or_else(|| anyhow!("yamnet: no embeddings"))?;
             let probs = self.head.run(tvec!(embeddings.clone()))?;
             let probs = probs[0].to_array_view::<f32>()?;
-            // the frames fully in the sound, not in the padding
             let usable = ((valid - FRAME) / HOP + 1).min(probs.shape()[0]);
             for f in 0..usable {
                 let p = probs[[f, 1]];
@@ -95,7 +77,6 @@ impl Models {
     }
 }
 
-/// The sound at 16 kHz, by linear interpolation.
 fn resample(samples: &[f32], rate: usize) -> Vec<f32> {
     if rate == RATE {
         return samples.to_vec();

@@ -1,13 +1,3 @@
-//! The bar at the bottom: on top the time (a click or a drag seeks),
-//! where the song is and its length just over its ends, the song's
-//! title centred between; half a rem under it the transport, centred,
-//! and beside it, as far under the time, the song's artist and the
-//! album or playlist the queue plays, a button each, on the left, repeat
-//! and repeat one side by side on the right:
-//!   0:03                 title                16:24
-//!   ───────────────── time ─────────────────
-//!   [☺] [◉]           ⏮  ⏯  ⏭           [⟲] [⟲1]
-
 use std::time::Duration;
 
 use mpd_client::commands::SingleMode;
@@ -21,25 +11,18 @@ use crate::rl::Vector2;
 use crate::size::rem;
 use crate::ui::{self, Look, Style, Ui, R};
 
-/// The player's room at its top and between its rows, in rem: the
-/// header's, above and under the tabs.
 const EDGE: f32 = 0.5;
-/// The player's room at its bottom, in rem.
 const BOTTOM: f32 = 2.0;
-/// Play and pause's round button, bigger than the rest, in rem.
 const BIG: f32 = 3.25;
-/// Around the song's title, in rem.
 const PAD: f32 = 1.0;
 
 pub fn height(ui: &Ui) -> f32 {
-    // the times, the time, the transport
     rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(ui.square_side()) + rem(BOTTOM)
 }
 
 pub fn draw(app: &App, ui: &mut Ui, r: R) {
     ui.rect(r, ui::BG);
     let blocked = ui.blocked;
-    // mpd unreachable: the player shown, not usable
     ui.blocked = blocked || !app.connected;
     ui.with_alpha(if app.connected { 1.0 } else { 0.5 }, |ui| bar(app, ui, r));
     ui.blocked = blocked;
@@ -50,11 +33,9 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let now = app.now.as_ref();
     let playing = now.is_some_and(|n| n.playing());
 
-    // the time: where the song is, as the clock runs between statuses
     let clock = app.clock;
     let length = clock.map(|c| c.length).unwrap_or_default();
     let mut at = clock.map(|c| if playing { c.elapsed + c.since.elapsed() } else { c.elapsed }.min(c.length)).unwrap_or_default();
-    // over it where the song is and its length
     let lh = ui.line(Style::Header);
     let times = r.y + rem(EDGE);
     let bar = R::new(x0, times + lh + rem(0.25), cw, rem(0.5));
@@ -70,7 +51,6 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     if seekable && ui.drag == Some("seek") {
         at = to(ui);
     }
-    // its corners rounded as the tabs' are, which at its height is round
     ui.rounded(bar, rem(0.5), ui::SHADE);
     let k = if seekable { (at.as_secs_f64() / length.as_secs_f64()) as f32 } else { 0.0 };
     let done = (bar.w * k).round();
@@ -84,10 +64,6 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         ui.wake(1.0 - at.as_secs_f64().fract());
     }
 
-    // the transport, half a rem under the time: previous and next, round
-    // and flat, and between them the big one, play while paused, pause
-    // while playing; the square buttons beside it level with its middle,
-    // the album's and the artist's on the left, the repeats on the right
     let rh = ui.square_side();
     let (small, big, margin) = (rem(2.25), rem(BIG), rem(0.5));
     let mid = bar.bottom() + rem(EDGE) + big.max(rh) / 2.0;
@@ -117,14 +93,11 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
             app.act(Action::Mpd(command));
         }
     }
-    // where the song is and its length, over the time's ends
     if clock.is_some() {
         ui.text(Style::Header, &library::clock(at), x0, times, f32::MAX);
         ui.text_right(Style::Header, &library::clock(length), x0 + cw, times);
     }
 
-    // the right: repeat (the queue) and repeat one (the song on, over and
-    // over), side by side, in the accent while on, repeat off from either
     let single = now.is_some_and(|n| n.status.single == SingleMode::Enabled);
     let repeat = now.is_some_and(|n| n.status.repeat);
     let repeats = x0 + cw - 2.0 * rh - rem(0.5);
@@ -136,9 +109,6 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         x += rh + rem(0.5);
     }
 
-    // the left: the song's artist, that opens the page of the artist the
-    // album is filed under, and what the queue plays (an album, a
-    // playlist, the queue itself), with its glyph, that opens it
     let place = match app.current().0 {
         Some(uri) => app.library.as_ref().and_then(|l| l.place(uri).map(|(a, t)| (l.clone(), a, t))),
         None => app.waiting(),
@@ -158,12 +128,8 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         }
     }
 
-    // over the time, the song's title centred between where the song is
-    // and its length, the pad from either, the ellipsis where it ends
     let title = match now.and_then(|n| n.song.as_ref()) {
         Some(entry) => entry.song.title().unwrap_or(&entry.song.url).to_owned(),
-        // stopped at the end of the list: the list stays, its first track
-        // ready, the way a paused one shows
         None => match &place {
             Some((library, a, t)) => library.albums[*a].tracks[*t].title.clone(),
             None => glyphs::NOTHING.to_owned(),
@@ -180,7 +146,6 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     }
 }
 
-/// The album's page, the saved playlist's, or the queue's tab.
 pub fn open_source(app: &App) {
     match &app.master.source {
         Source::Playlist { path } => app.act(Action::OpenPlaylist(path.clone())),

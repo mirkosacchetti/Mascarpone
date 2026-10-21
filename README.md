@@ -34,7 +34,9 @@ raylib (6.2, without audio and models) is in `vendor/raylib` and is
 built with the program, once, in `target/raylib` (`build.rs`, raylib's
 own Makefile): it wants `make`, a C compiler and `wayland-scanner`.
 bliss (bliss-audio 0.13, the song analysis for the radio) is in
-`vendor/bliss-rs`, built with its symphonia decoder and no ffmpeg; it
+`vendor/bliss-rs`, built with its symphonia decoder and no ffmpeg,
+with one addition, `Song::analyze_series`, the analysis that keeps
+also what the descriptors saw window by window, for the shape; it
 is GPL-3 (its `LICENSE` is there), which a Mascarpone built with it is
 distributed under. SQLite comes with rusqlite, built in. The voice
 models are built in too, run by tract (ONNX, in Rust): YAMNet in
@@ -63,7 +65,7 @@ key left out keeps its default, one not known is said on stderr.
     playlists = ~/Music/Playlists
 
     [radio]
-    threads = 8             # files analyzed at a time: half the cores
+    threads = 4             # files analyzed at a time: a quarter of the cores
 
     [keys]
     play_pause = Space c    # an action = its keys, by spaces
@@ -215,9 +217,35 @@ The radio is a queue that never ends: every track like the ones before
 it. bliss (`vendor/bliss-rs`) listens to every file of the library
 once and keeps what it heard as a vector of 23 numbers (tempo, timbre,
 loudness, chroma); two tracks are alike when their vectors are near.
-The analysis runs on a thread of its own at the lowest priority
-(`[radio] threads` files at a time, half the cores by default) after
-every load of the library, on the files new or changed since (by their
+Those are means and deviations over the whole track, how it sounds
+and not how it goes: so the same pass keeps the track's shape too
+(`src/shape.rs`), eight more numbers from what bliss's descriptors see
+window by window before summing up (the vendored bliss keeps the
+series: the loudness of every 46 ms, the centroid of every 6 ms, the
+chroma of every tenth of a second, the beats and the onsets found).
+The rise: the last third's loudness over the first's, in dB, a
+crescendo or a fade. The arch: the middle third over the two ends, a
+swell or a dip. The sections: how many the track has, found as the
+peaks of novelty between the twelve seconds before and the twelve
+after each second, on seconds smoothed over eight so that a section is
+a colour and not a run of chords, in doublings. The repetition: the
+share of seconds a four-second run from which comes back later, once
+the track has gone elsewhere, a verse or a chorus again (a drone that
+goes on is no return). The harmony: how far the track's chroma is
+from any one key, by Krumhansl's profiles; chromatic music, and noise,
+far. The changes: how far the chroma moves from a second to the next.
+The pulse: the share of beats on the pulse, within 12% of the median
+interval. The onsets: the attacks a second. Each between fixed
+bounds in -1..1 as bliss's own (±10 dB, 1 to 32 sections, 0 to 60%
+off a key, 0 to 0.3 of chroma movement, 1 to 7 onsets a second,
+shares whole), the same for a track in any library; the bounds are
+from a few dozen known tracks and `cargo test --release
+shape::tests::probe -- --ignored --nocapture` with `SHAPE_FILES`
+prints the shape of any files, raw and bounded, to see them against
+more. The analysis runs on a thread of its own at the lowest priority
+(`[radio] threads` files at a time, a quarter of the cores by default,
+the first time a few seconds after the window opens) after every load
+of the library, on the files new or changed since (by their
 modification time and size); it shows in the header, on the right, as
 done of how many, and the radio works with what is analyzed so far. A
 file symphonia cannot decode (Opus) is left out, its error in the
@@ -251,7 +279,9 @@ name; a service's word, `spotify`, with the playlist's web link, filled
 in by hand for now; both empty for a file from nowhere known, both
 kept over the rewrites) and `playlist_entry` (a row an entry, with the
 track's id when the library has it). On `track` the analysis too: the file's stamp, the features'
-version, every feature in a column of its own, or the error, and the
+version, every feature in a column of its own, or the error, the shape
+(its eight columns by name and `shaped`, its version: a track with an
+older one is listened to again) and the
 voice heard (`voice`, `voiced`, `vocal`). On `artist` what the net says: the MusicBrainz and Deezer ids, the
 biography, the Wikipedia article and whether there is a portrait (the
 artist's page asks the first time; the JSON kept before in
@@ -265,20 +295,28 @@ for the record and for `sqlite3`.
 `s` (or the radio button: on an album's and an artist's page, on
 their cards, right of the play button, and at the end of every track
 row the library has) starts a radio from what is
-selected: a track, which plays first; an album, whose tracks together are what the
-path starts from, none of them played; an artist, twenty of whose
-tracks open it at random, and whose tracks are all it plays. Whenever
-fewer than five tracks remain after the song on, twenty more are
-added: an arc from the seed, always from the seed (a track's vector,
+selected: a track, the seed and nothing more, nearest to itself and so
+likely to come first, about three times in ten, or not; an album,
+whose tracks together are what the path starts from, none of them
+forced in; an artist, fifteen of whose tracks open it at random, and
+whose tracks are all it plays. Then
+three arcs of fifteen tracks, and another arc as the first track of
+the last one starts, so that two whole arcs are always ahead: each
+arc from the seed, always from the seed (a track's vector,
 the mean of an album's or an artist's tracks) and never from what
-played last, four tracks a part, each part passing into the next over
-its four tracks, a quarter a track: the
-equilibrium (the seed, steadier), the break (tension: the minor and
-diminished triads up, the loudness and brightness less steady), the
-adventure (faster, louder, brighter, more varied, more vocal), the
-resolution (loud and open, the major up), the new equilibrium (slower,
-quieter, darker, sparser, less vocal). Each part is a shift of the seed's vector along
-bliss's features (`ARC` in `src/radio.rs`; a track between two parts
+played last, three tracks a part, each part passing into the next over
+its three tracks, a third a track: the
+equilibrium (the seed itself, no shift), the break
+(tension: the minor and diminished triads up, the loudness and
+brightness less steady; the harmony moving and far from a key, more
+sections, the pulse loose, a dip), the adventure (faster, louder,
+brighter, more varied, more vocal; a crescendo, many sections, dense
+with attacks, through-composed), the resolution (loud and open, the
+major up; an arch that comes down, a return, the harmony settling),
+the new equilibrium (slower, quieter, darker, sparser, less vocal; a
+fade, sparse, still, few sections, back on itself and on a pulse).
+Each part is a shift of the seed's vector along
+bliss's features, the voice's and the shape's (`ARC` in `src/radio.rs`; a track between two parts
 gets the two shifts in proportion), measured in standard
 deviations of each feature over the library, so that a feature the
 library hardly spans is shifted as gently as one it spans whole; its track is the
@@ -287,9 +325,11 @@ never one already in the queue, never one longer than a quarter of an
 hour (a whole side, a live set). A track by an artist linked
 to the seed's artist counts as nearer: its distance is shortened by
 35% for a relation or an influence, by 25% for an artist Deezer finds
-alike. The distance is over bliss's 23 features and the two of the
-voice, each in -1..1: a song and an instrumental are far apart however
-alike they sound otherwise. And the voice is a ceiling:
+alike. The distance is over bliss's 23 features, the two of the
+voice and the eight of the shape, each in -1..1: a song and an
+instrumental are far apart however alike they sound otherwise, a
+crescendo and a fade too; a track not shaped yet (an older version)
+sits at zero on every shape, halfway from all. And the voice is a ceiling:
 no track more vocal than where the radio started (a track's voice; the
 most vocal track of an album or an artist), so a radio from an
 instrumental plays instrumentals only, one from a song anything; a

@@ -1,31 +1,3 @@
-//! Mascarpone's database: SQLite, `~/.local/share/mascarpone/mascarpone.db`,
-//! everything by integer ids. The library as mpd gives it, written
-//! whole at every load (`artist`, `album`, `track`, `playlist` with its
-//! shuffle and its origin, `playlist_entry`), the rows of what is gone
-//! dropped. A playlist's origin is two columns: what it came from
-//! (`queue`, `radio:track`, `radio:album`, `radio:artist`, or a word
-//! for a service, `spotify`) and the origin's address (the track's uri,
-//! the album's key, the artist's name; the web link of a service's
-//! playlist), both kept over the rewrites, both empty for a file from
-//! nowhere known. On `track`,
-//! bliss's analysis too: the file's stamp (modification time and size,
-//! so a file changed is analyzed again), the features' version, and
-//! every feature in a column of its own (tempo, zero-crossing rate, the
-//! spectral centroid, rolloff and flatness, the loudness, as mean and
-//! deviation, the thirteen chroma features), or the error when the file
-//! could not be analyzed (a codec symphonia does not decode, such as
-//! Opus); and the voice heard in it (`voice`, the mean likelihood;
-//! `voiced`, the share of frames with one; `vocal`, 1 when the mean is
-//! over a half). On `artist`, what the net says: the MusicBrainz and Deezer
-//! ids, the biography, the Wikipedia article, whether there is a
-//! portrait; and in `relation` their links to other artists, a row a
-//! link (a band's member, a collaboration, an influence, one alike),
-//! with its kind and source, the other artist a row of `artist` too
-//! (`in_library` 0 when the library has none of theirs), found by
-//! MusicBrainz id, else Deezer id, else name. The window keeps what it
-//! needs in memory; the file is for the record, and for whatever else
-//! wants to look (`sqlite3`).
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,10 +7,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::library::{Library, Playlist};
 use crate::net::Info;
-use crate::radio::{Vector, N};
+use crate::radio::{Vector, Vectors, N};
+use crate::shape::{self, Shape};
 use crate::voice::Voice;
 
-/// The columns of the analysis, in bliss's order (`AnalysisIndex`).
 pub const FEATURES: [&str; N] = [
     "tempo",
     "zcr",
@@ -65,26 +37,20 @@ pub const FEATURES: [&str; N] = [
     "chroma13",
 ];
 
-/// The version of bliss's features the rows hold: rows of another are
-/// analyzed again.
 pub const VERSION: i64 = bliss_audio::FeaturesVersion::LATEST as i64;
 
-/// The schema's version, `pragma user_version`.
-const SCHEMA: i64 = 7;
+const SCHEMA: i64 = 8;
 
 pub fn path() -> PathBuf {
     crate::dirs::data().join("mascarpone").join("mascarpone.db")
 }
 
-/// A file's stamp: modification time (seconds) and size.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stamp {
     pub mtime: i64,
     pub size: i64,
 }
 
-/// What a track's row has of its file: the stamp it was analyzed at,
-/// and whether bliss's features and the voice are there.
 #[derive(Clone, Copy, Debug)]
 pub struct Done {
     pub stamp: Stamp,
@@ -92,21 +58,15 @@ pub struct Done {
     pub voice: bool,
 }
 
-/// A link from an artist to another, as the net gives it: the other by
-/// name, with their MusicBrainz or Deezer id when the net has one.
 #[derive(Debug, Clone)]
 pub struct Link {
     pub other: String,
     pub other_mbid: Option<String>,
     pub other_deezer: Option<i64>,
-    /// MusicBrainz's words ("member of band", "collaboration"...),
-    /// Wikidata's "influenced by", Deezer's "similar".
     pub kind: String,
     pub source: String,
 }
 
-/// A link between two artists of the library, by name, and where it
-/// came from (what weighs it).
 #[derive(Debug, Clone)]
 pub struct Relation {
     pub artist: String,
@@ -114,15 +74,12 @@ pub struct Relation {
     pub source: String,
 }
 
-/// The database, shared by the threads that write it (the radio's, mpd's).
 pub type Shared = Arc<Mutex<Db>>;
 
 pub struct Db {
     conn: Connection,
 }
 
-/// The database opened, its schema made or brought up to date; in
-/// memory, for the session only, when the file cannot be had.
 pub fn open() -> Shared {
     let path = path();
     let db = match Db::open(&path) {
@@ -152,15 +109,12 @@ impl Db {
         Ok(db)
     }
 
-    /// The schema; a database of the first days (the tracks' analysis
-    /// by uri, the artists and their links by name) carried over.
     fn prepare(&mut self) -> Result<()> {
         self.conn.pragma_update(None, "foreign_keys", "on")?;
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version >= SCHEMA {
             return Ok(());
         }
-        // from the second schema on: the playlists' shuffle, their origin
         if version >= 2 {
             if version < 3 {
                 self.conn.execute_batch("alter table playlist add column shuffle integer not null default 1")?;
@@ -177,6 +131,12 @@ impl Db {
             if version < 7 {
                 self.conn.execute_batch("alter table album add column mbid text; alter table track add column mbid text;")?;
             }
+            if version < 8 {
+                for column in shape::NAMES {
+                    self.conn.execute_batch(&format!("alter table track add column {column} real"))?;
+                }
+                self.conn.execute_batch("alter table track add column shaped integer")?;
+            }
             self.conn.pragma_update(None, "user_version", SCHEMA)?;
             return Ok(());
         }
@@ -184,7 +144,7 @@ impl Db {
         if old {
             self.conn.execute_batch("alter table track rename to old_track; alter table artist rename to old_artist; alter table relation rename to old_relation;")?;
         }
-        let features = FEATURES.iter().map(|f| format!("{f} real")).collect::<Vec<_>>().join(", ");
+        let features = FEATURES.iter().chain(&shape::NAMES).map(|f| format!("{f} real")).collect::<Vec<_>>().join(", ");
         self.conn.execute_batch(&format!(
             "create table artist (
                 id integer primary key,
@@ -226,6 +186,7 @@ impl Db {
                 analyzed text,
                 error text,
                 {features},
+                shaped integer,
                 voice real,
                 voiced real,
                 vocal integer,
@@ -262,8 +223,6 @@ impl Db {
         Ok(())
     }
 
-    /// The first schema's rows into this one: the analyses, the artists
-    /// answered about and their links.
     fn carry_over(&mut self) -> Result<()> {
         let columns = FEATURES.join(", ");
         self.conn.execute(
@@ -289,24 +248,16 @@ impl Db {
         Ok(())
     }
 
-    // the library
-
-    /// The library written whole: the artists (the albums' marked as the
-    /// library's, the rest not, each given the MusicBrainz id its tags
-    /// carry), the albums, the tracks with their tags (the analysis
-    /// kept), the playlists; the rows of what is gone dropped.
     pub fn write_library(&mut self, library: &Library) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("update artist set in_library = 0", [])?;
         {
-            let mut artist = tx.prepare_cached("insert into artist (name, in_library) values (?1, 1) on conflict (name) do update set in_library = 1")?;
+            let mut artist = tx.prepare_cached("insert into artist (name, in_library) values (?1, 1) on conflict (name) do update set in_library = 1, name = excluded.name")?;
             for a in &library.artists {
                 artist.execute(params![a.name])?;
                 let id: i64 = tx.query_row("select id from artist where name = ?1", params![a.name], |r| r.get(0))?;
                 match a.mbids.as_slice() {
                     [mbid] => claim_mbid(&tx, id, mbid)?,
-                    // a collaboration: its members are asked of the net
-                    // once, and are its links from the tags
                     [_, _, ..] => {
                         let linked: bool = tx.query_row("select exists (select 1 from relation where artist_id = ?1 and source = 'tags')", params![id], |r| r.get(0))?;
                         if !linked {
@@ -346,8 +297,6 @@ impl Db {
         Ok(())
     }
 
-    /// The playlists written whole, each with its shuffle as `master`
-    /// keeps it, its origin kept; the rows of files gone dropped.
     pub fn write_playlists(&mut self, playlists: &[Playlist]) -> Result<()> {
         let tx = self.conn.transaction()?;
         write_playlists(&tx, playlists)?;
@@ -355,8 +304,6 @@ impl Db {
         Ok(())
     }
 
-    /// Where a playlist came from, on its row (made if the file has not
-    /// been read yet): what, and its address.
     pub fn set_origin(&self, path: &Path, name: &str, origin: &str, url: Option<&str>) -> Result<()> {
         self.conn.execute(
             "insert into playlist (name, path, origin, origin_url) values (?1, ?2, ?3, ?4) on conflict (path) do update set origin = excluded.origin, origin_url = excluded.origin_url",
@@ -365,25 +312,16 @@ impl Db {
         Ok(())
     }
 
-    // the analysis
-
-    /// Every analyzed track's stamp, by uri, with what it has: bliss's
-    /// features of this version (a row of another version counts for
-    /// nothing, so its file is analyzed again), the voice. A file that
-    /// erred has both, nothing to do over.
     pub fn stamps(&self) -> Result<HashMap<String, Done>> {
-        let mut stmt = self.conn.prepare("select uri, mtime, size, version = ?1 or error is not null, voice is not null or error is not null from track where mtime is not null")?;
-        let rows = stmt.query_map(params![VERSION], |r| Ok((r.get::<_, String>(0)?, Done { stamp: Stamp { mtime: r.get(1)?, size: r.get(2)? }, bliss: r.get(3)?, voice: r.get(4)? })))?;
+        let mut stmt = self.conn.prepare("select uri, mtime, size, (version = ?1 and shaped is ?2) or error is not null, voice is not null or error is not null from track where mtime is not null")?;
+        let rows = stmt.query_map(params![VERSION, shape::VERSION], |r| Ok((r.get::<_, String>(0)?, Done { stamp: Stamp { mtime: r.get(1)?, size: r.get(2)? }, bliss: r.get(3)?, voice: r.get(4)? })))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The analyses, by uri: the rows of this version without an error;
-    /// and the voice heard, by uri.
-    pub fn vectors(&self) -> Result<(HashMap<String, Vector>, HashMap<String, Voice>)> {
-        let sql = format!("select uri, {}, voice, voiced from track where (version = ?1 or voice is not null) and error is null", FEATURES.join(", "));
+    pub fn vectors(&self) -> Result<Vectors> {
+        let sql = format!("select uri, {}, voice, voiced, shaped, {} from track where (version = ?1 or voice is not null) and error is null", FEATURES.join(", "), shape::NAMES.join(", "));
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut vectors = HashMap::new();
-        let mut voices = HashMap::new();
+        let mut vectors = Vectors::default();
         let rows = stmt.query_map(params![VERSION], |r| {
             let uri: String = r.get(0)?;
             let mut v = [0f32; N];
@@ -398,21 +336,31 @@ impl Db {
                 (Some(mean), Some(share)) => Some(Voice { mean: mean as f32, share: share as f32 }),
                 _ => None,
             };
-            Ok((uri, whole.then_some(v), voice))
+            let mut shape = [0f32; shape::N];
+            let mut shaped = r.get::<_, Option<i64>>(N + 3)? == Some(shape::VERSION);
+            for (i, x) in shape.iter_mut().enumerate() {
+                match r.get::<_, Option<f64>>(N + 4 + i)? {
+                    Some(f) => *x = f as f32,
+                    None => shaped = false,
+                }
+            }
+            Ok((uri, whole.then_some(v), voice, shaped.then_some(shape)))
         })?;
         for row in rows {
-            let (uri, vector, voice) = row?;
+            let (uri, vector, voice, shape) = row?;
             if let Some(v) = vector {
-                vectors.insert(uri.clone(), v);
+                vectors.by_uri.insert(uri.clone(), v);
             }
             if let Some(v) = voice {
-                voices.insert(uri, v);
+                vectors.voice.insert(uri.clone(), v);
+            }
+            if let Some(s) = shape {
+                vectors.shape.insert(uri, s);
             }
         }
-        Ok((vectors, voices))
+        Ok(vectors)
     }
 
-    /// The voice heard in a file, or the error, onto its track's row.
     pub fn write_voice(&self, uri: &str, stamp: Stamp, voice: &Result<Voice, String>) -> Result<()> {
         match voice {
             Ok(v) => self.conn.execute(
@@ -424,19 +372,19 @@ impl Db {
         Ok(())
     }
 
-    /// A file's analysis, or the error, onto its track's row.
-    pub fn write_analysis(&self, uri: &str, stamp: Stamp, analysis: &Result<Vector, String>) -> Result<()> {
-        let (error, vector) = match analysis {
+    pub fn write_analysis(&self, uri: &str, stamp: Stamp, analysis: &Result<(Vector, Shape), String>) -> Result<()> {
+        let (error, heard) = match analysis {
             Ok(v) => (None, Some(v)),
             Err(e) => (Some(e.clone()), None),
         };
-        let sets = FEATURES.iter().enumerate().map(|(i, f)| format!("{f} = ?{}", 6 + i)).collect::<Vec<_>>().join(", ");
-        let sql = format!("update track set mtime = ?2, size = ?3, version = ?4, analyzed = datetime('now'), error = ?5, {sets} where uri = ?1");
+        let sets = FEATURES.iter().chain(&shape::NAMES).enumerate().map(|(i, f)| format!("{f} = ?{}", 7 + i)).collect::<Vec<_>>().join(", ");
+        let sql = format!("update track set mtime = ?2, size = ?3, version = ?4, analyzed = datetime('now'), error = ?5, shaped = ?6, {sets} where uri = ?1");
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let mut values: Vec<rusqlite::types::Value> = vec![uri.to_owned().into(), stamp.mtime.into(), stamp.size.into(), VERSION.into(), error.into()];
-        for i in 0..N {
-            values.push(match vector {
-                Some(v) => (v[i] as f64).into(),
+        let shaped = heard.map(|_| shape::VERSION);
+        let mut values: Vec<rusqlite::types::Value> = vec![uri.to_owned().into(), stamp.mtime.into(), stamp.size.into(), VERSION.into(), error.into(), shaped.into()];
+        for i in 0..N + shape::N {
+            values.push(match heard {
+                Some((v, s)) => (if i < N { v[i] } else { s[i - N] } as f64).into(),
                 None => rusqlite::types::Value::Null,
             });
         }
@@ -444,10 +392,6 @@ impl Db {
         Ok(())
     }
 
-    // the artists from the net
-
-    /// What the net said of an artist, once it has been asked.
-    /// The artist's MusicBrainz id, when the tags or the net gave one.
     pub fn artist_mbid(&self, name: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare_cached("select mbid from artist where name = ?1")?;
         Ok(stmt.query_row(params![name], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
@@ -467,22 +411,17 @@ impl Db {
         Ok(())
     }
 
-    /// The artist's words forgotten, to be asked again.
     pub fn forget_info(&self, name: &str) -> Result<()> {
         self.conn.execute("update artist set bio = null, wikipedia = null, portrait = null, info_fetched = null where name = ?1", params![name])?;
         Ok(())
     }
 
-    /// The artists whose links the net has given, with their MusicBrainz
-    /// id when it had one; one it erred on is asked again.
     pub fn linked(&self) -> Result<HashMap<String, Option<String>>> {
         let mut stmt = self.conn.prepare("select name, mbid from artist where links_fetched is not null and links_error is null")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// What the net said of an artist's links: their ids, the error if
-    /// the net erred, and their links anew, each other artist a row.
     pub fn write_links(&mut self, name: &str, mbid: Option<&str>, deezer: Option<i64>, error: Option<&str>, links: &[Link]) -> Result<()> {
         let tx = self.conn.transaction()?;
         let id = artist_id(&tx, name, mbid, deezer)?;
@@ -498,7 +437,6 @@ impl Db {
         Ok(())
     }
 
-    /// Every link between two artists of the library, by name.
     pub fn relations(&self) -> Result<Vec<Relation>> {
         let mut stmt = self.conn.prepare(
             "select a.name, b.name, r.source from relation r join artist a on a.id = r.artist_id join artist b on b.id = r.other_id where a.in_library = 1 and b.in_library = 1",
@@ -508,23 +446,15 @@ impl Db {
     }
 }
 
-/// The library's artist given the MusicBrainz id its tags carry. A row
-/// made for that id from another's links is merged into theirs. When
-/// the row had another id, the net was asked about a namesake: what it
-/// said moves to a row of its own, and the artist is asked about again.
 fn claim_mbid(conn: &Connection, id: i64, mbid: &str) -> Result<()> {
     let old: Option<String> = conn.query_row("select mbid from artist where id = ?1", params![id], |r| r.get(0))?;
     if old.as_deref() == Some(mbid) {
         return Ok(());
     }
     let theirs = conn.query_row("select id, in_library from artist where mbid = ?1 and id != ?2", params![mbid, id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))).optional()?;
-    // two names of the library for one artist ("Basinski, William" and
-    // "William Basinski"): the id stays with the first, the other is
-    // known by name as before
     if theirs.is_some_and(|(_, in_library)| in_library) {
         return Ok(());
     }
-    // the namesake's first, so that the merge's links stay
     if let Some(old) = old {
         conn.execute(
             "insert or ignore into artist (name, mbid, deezer_id, bio, wikipedia, portrait, info_fetched, links_fetched, links_error)
@@ -540,13 +470,10 @@ fn claim_mbid(conn: &Connection, id: i64, mbid: &str) -> Result<()> {
     if let Some((theirs, _)) = theirs {
         merge_artist(conn, theirs, id)?;
     }
-    // asked about again, by id now
     conn.execute("update artist set mbid = ?2, links_fetched = null, links_error = null where id = ?1", params![id, mbid])?;
     Ok(())
 }
 
-/// One artist's row folded into another's: the links, the albums and
-/// tracks moved over, the ids and words kept where the other lacks them.
 fn merge_artist(conn: &Connection, from: i64, into: i64) -> Result<()> {
     conn.execute("update or ignore relation set artist_id = ?2 where artist_id = ?1", params![from, into])?;
     conn.execute("update or ignore relation set other_id = ?2 where other_id = ?1", params![from, into])?;
@@ -568,10 +495,6 @@ fn merge_artist(conn: &Connection, from: i64, into: i64) -> Result<()> {
     Ok(())
 }
 
-/// The artist's row, found by MusicBrainz id, else Deezer id, else name
-/// (case aside, unless that row is known to be another's by its id),
-/// made when there is none (as "name (id)" after a namesake); the ids
-/// filled in.
 fn artist_id(conn: &Connection, name: &str, mbid: Option<&str>, deezer: Option<i64>) -> Result<i64> {
     let by_mbid = |m: &str| conn.query_row("select id from artist where mbid = ?1", params![m], |r| r.get::<_, i64>(0)).optional();
     let by_deezer = |d: i64| conn.query_row("select id from artist where deezer_id = ?1", params![d], |r| r.get::<_, i64>(0)).optional();
@@ -622,17 +545,64 @@ mod tests {
     }
 
     #[test]
+    fn the_shape_is_analyzed_with_the_vector_and_again_when_it_changes() {
+        let mut db = Db::in_memory().unwrap();
+        db.write_library(&Library::of(&[("Can", "Tago Mago", 1)])).unwrap();
+        let uri = "Can/Tago Mago/1.ogg";
+        let stamp = Stamp { mtime: 1, size: 2 };
+        let (mut vector, mut shape) = ([0f32; N], [0f32; shape::N]);
+        vector[0] = 0.5;
+        shape[shape::RISE] = -0.25;
+        db.write_analysis(uri, stamp, &Ok((vector, shape))).unwrap();
+        let done = db.stamps().unwrap()[uri];
+        assert!(done.bliss && !done.voice);
+        let vectors = db.vectors().unwrap();
+        assert_eq!(vectors.by_uri[uri], vector);
+        assert_eq!(vectors.shape[uri], shape);
+        db.conn.execute("update track set shaped = null", []).unwrap();
+        assert!(!db.stamps().unwrap()[uri].bliss, "no shape yet: listened to again");
+        db.conn.execute("update track set shaped = ?1", params![shape::VERSION - 1]).unwrap();
+        assert!(!db.stamps().unwrap()[uri].bliss, "an older shape is listened to again");
+        let vectors = db.vectors().unwrap();
+        assert_eq!(vectors.by_uri[uri], vector, "the vector serves meanwhile");
+        assert!(!vectors.shape.contains_key(uri));
+        db.write_analysis(uri, stamp, &Err("no".into())).unwrap();
+        assert!(db.stamps().unwrap()[uri].bliss, "an error is not tried again");
+        assert!(db.vectors().unwrap().by_uri.is_empty());
+    }
+
+    #[test]
+    fn a_database_from_before_the_shape_gets_its_columns() {
+        let mut db = Db::in_memory().unwrap();
+        for column in shape::NAMES.iter().chain(&["shaped"]) {
+            db.conn.execute_batch(&format!("alter table track drop column {column}")).unwrap();
+        }
+        db.conn.pragma_update(None, "user_version", 7).unwrap();
+        db.prepare().unwrap();
+        db.write_library(&Library::of(&[("Can", "Tago Mago", 1)])).unwrap();
+        db.write_analysis("Can/Tago Mago/1.ogg", Stamp { mtime: 1, size: 2 }, &Ok(([0f32; N], [0f32; shape::N]))).unwrap();
+        assert_eq!(db.vectors().unwrap().shape.len(), 1);
+    }
+
+    #[test]
+    fn the_row_takes_the_library_s_spelling() {
+        let mut db = Db::in_memory().unwrap();
+        db.conn.execute("insert into artist (name) values ('CAN')", []).unwrap();
+        db.write_library(&Library::of(&[("Can", "Tago Mago", 2)])).unwrap();
+        db.write_links("Can", Some("can"), None, None, &[]).unwrap();
+        assert!(db.linked().unwrap().contains_key("Can"));
+        assert_eq!(db.conn.query_row("select count(*) from artist", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
     fn the_tags_id_wins_over_the_net_s() {
         let mut db = Db::in_memory().unwrap();
         let mut lib = Library::of(&[("Beck", "Odelay", 2), ("Pavement", "Wowee Zowee", 2)]);
         db.write_library(&lib).unwrap();
-        // the net found a namesake for Beck, and Pavement's links name
-        // the real one, a row out of the library
         db.write_links("Beck", Some("namesake"), None, None, &[link("Jeff Beck", Some("jeff"), "member of band", "musicbrainz")]).unwrap();
         db.write_links("Pavement", Some("pavement"), None, None, &[link("Beck", Some("beck"), "collaboration", "musicbrainz")]).unwrap();
         assert_eq!(db.linked().unwrap().len(), 2);
         assert_eq!(db.relations().unwrap().len(), 0, "the real Beck is not in the library yet");
-        // the tags say who Beck is
         let beck = lib.artists.iter().position(|a| a.name == "Beck").unwrap();
         lib.artists[beck].mbids = vec!["beck".into()];
         db.write_library(&lib).unwrap();
@@ -651,7 +621,6 @@ mod tests {
         assert_eq!((relations[0].artist.as_str(), relations[0].other.as_str()), ("Pavement", "Beck"));
         let count: i64 = db.conn.query_row("select count(*) from artist where mbid = 'beck'", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1);
-        // once answered by id, settled
         db.write_links("Beck", Some("beck"), None, None, &[]).unwrap();
         db.write_library(&lib).unwrap();
         assert!(db.linked().unwrap().contains_key("Beck"));

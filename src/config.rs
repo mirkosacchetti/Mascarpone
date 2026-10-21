@@ -1,27 +1,11 @@
-//! The configuration: `~/.config/mascarpone/mascarpone.conf`, the usual
-//! way of a `.conf` file: `key = value` lines under `[section]` heads,
-//! `#` starting a comment (at a line's start, or after a space), blank
-//! lines ignored. A key missing keeps its default; one not known, or a
-//! key that cannot be read, is said on stderr and skipped.
-//!
-//!   [mpd]      host, port, password (MPD_HOST and MPD_PORT, as mpc reads
-//!              them, win when set)
-//!   [library]  music, playlists: the folders
-//!   [radio]    threads: how many files bliss analyzes at a time
-//!   [keys]     an action = the keys that do it, by spaces
-//!
-//! Read once at the start.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::rl::{self, Input};
 
-/// What a key can do.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Shortcut {
-    // anywhere, and in the commands' picker
     Commands,
     SearchAll,
     Search,
@@ -52,7 +36,6 @@ pub enum Shortcut {
     ZoomOut,
     ZoomReset,
     Quit,
-    // in the grids and the lists
     Left,
     Right,
     Down,
@@ -62,7 +45,6 @@ pub enum Shortcut {
     Remove,
     MoveDown,
     MoveUp,
-    // in the picker and the dialogs
     PickerNext,
     PickerPrevious,
     PickerPageDown,
@@ -71,8 +53,6 @@ pub enum Shortcut {
     PickerClose,
 }
 
-/// Every action: its name in the file, its keys by default, and what the
-/// commands' picker calls it (none: not there, a key of a page's own).
 const ACTIONS: &[(Shortcut, &str, &str, Option<&str>)] = &[
     (Shortcut::Commands, "commands", "Ctrl+k", None),
     (Shortcut::SearchAll, "search_all", "/", Some("Search everything")),
@@ -121,15 +101,10 @@ const ACTIONS: &[(Shortcut, &str, &str, Option<&str>)] = &[
     (Shortcut::PickerClose, "picker_close", "Escape Ctrl+g", None),
 ];
 
-/// The commands' picker: what each action is called, and its keys as the
-/// configuration writes them.
 pub fn commands() -> Vec<(Shortcut, &'static str, String)> {
     ACTIONS.iter().filter_map(|(a, _, _, title)| Some((*a, (*title)?, get().labels.get(a).cloned().unwrap_or_default()))).collect()
 }
 
-/// A key as the file names it: a character (as the keyboard's layout
-/// writes it: `K` is Shift and k, `;` whatever it takes) or a key with a
-/// name, and the modifiers held. Shift counts for named keys only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Chord {
     ctrl: bool,
@@ -172,7 +147,6 @@ impl Chord {
         let mut rest = text;
         loop {
             let lower = rest.to_ascii_lowercase();
-            // a modifier, unless it is all there is left ("Ctrl++": the plus)
             let take = |prefix: &str| lower.starts_with(prefix) && rest.len() > prefix.len();
             if take("ctrl+") {
                 chord.ctrl = true;
@@ -198,13 +172,11 @@ impl Chord {
 
     fn matches(&self, input: &Input) -> bool {
         match *input {
-            // a character typed: no Ctrl or Alt held, the layout's character
             Input::Char(c) => !self.ctrl && !self.alt && self.key == Key::Char(c),
             Input::Key { code, mods } => {
                 let ctrl = mods & rl::MOD_CONTROL != 0;
                 let alt = mods & rl::MOD_ALT != 0;
                 let printable = rl::key_char(code);
-                // a printable key without Ctrl or Alt comes as its character
                 if printable.is_some() && !ctrl && !alt && !matches!(self.key, Key::Code(_)) {
                     return false;
                 }
@@ -229,20 +201,16 @@ pub struct Config {
     pub password: Option<String>,
     pub music: PathBuf,
     pub playlists: PathBuf,
-    /// Files analyzed at a time, for the radio.
     pub threads: usize,
     keys: HashMap<Shortcut, Vec<Chord>>,
-    /// The keys as written, for the commands' picker.
     labels: HashMap<Shortcut, String>,
 }
 
 impl Config {
-    /// Whether the input is one of the action's keys.
     pub fn is(&self, action: Shortcut, input: &Input) -> bool {
         self.keys.get(&action).is_some_and(|chords| chords.iter().any(|c| c.matches(input)))
     }
 
-    /// The action of these, if any, the input is a key of.
     pub fn which(&self, actions: &[Shortcut], input: &Input) -> Option<Shortcut> {
         actions.iter().copied().find(|a| self.is(*a, input))
     }
@@ -254,7 +222,6 @@ pub fn path() -> PathBuf {
     crate::dirs::config().join("mascarpone").join("mascarpone.conf")
 }
 
-/// The configuration, read the first time it is asked for.
 pub fn get() -> &'static Config {
     CONFIG.get_or_init(load)
 }
@@ -286,7 +253,6 @@ fn load() -> Config {
         Some(rest) => crate::dirs::home().join(rest),
         None => PathBuf::from(p),
     };
-    // mpc's way: MPD_HOST, maybe password@host, and MPD_PORT
     let env_host = std::env::var("MPD_HOST").ok().filter(|h| !h.is_empty());
     let (env_password, env_host) = match env_host {
         Some(h) if !h.starts_with('/') && h.contains('@') => {
@@ -300,14 +266,12 @@ fn load() -> Config {
     let password = env_password.or_else(|| take("mpd", "password"));
     let music = take("library", "music").map(home).unwrap_or_else(crate::dirs::music);
     let playlists = take("library", "playlists").map(home).unwrap_or_else(|| music.join("Playlists"));
-    // half the cores by default: the analysis is for the background
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    let threads = take("radio", "threads").and_then(|t| t.parse().ok()).filter(|&n| n > 0).unwrap_or((cores / 2).max(1));
+    let threads = take("radio", "threads").and_then(|t| t.parse().ok()).filter(|&n| n > 0).unwrap_or((cores / 4).max(1));
 
     let mut keys = HashMap::new();
     let mut labels = HashMap::new();
     for (action, name, default, _) in ACTIONS {
-        // an empty value: no key
         let text = match values.remove(&("keys".to_owned(), (*name).to_owned())) {
             Some(v) => v,
             None => (*default).to_owned(),
@@ -331,8 +295,6 @@ fn load() -> Config {
     Config { host, port, password, music, playlists, threads, keys, labels }
 }
 
-/// The line without its comment: `#` at the start, or after a space (a
-/// key may be `#` itself only as the first thing of a value: `x = #`).
 fn strip_comment(line: &str) -> &str {
     if line.trim_start().starts_with('#') {
         return "";
@@ -340,7 +302,6 @@ fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'#' && i > 0 && bytes[i - 1].is_ascii_whitespace() {
-            // `x = #`: the value's first character, a key
             let before = line[..i].trim_end();
             if before.ends_with('=') {
                 continue;

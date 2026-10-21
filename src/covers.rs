@@ -1,13 +1,3 @@
-//! Album covers, and the artists' portraits. mpd hands the picture over
-//! (embedded or the file next to the album), or the net does; it is
-//! shrunk once to a thumbnail in `~/.cache/mascarpone/covers`, read back
-//! and decoded on two threads of their own, and kept as a texture while
-//! it is shown: the last few hundred shown stay (a whole library of them
-//! would be hundreds of MB). A thumbnail stays until its file is deleted.
-//!
-//! The textures are made and dropped at the start of a frame only, never
-//! between two draws of one.
-
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,26 +10,18 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::mpd::Command;
 use crate::rl::{self, Texture};
 
-/// Thumbnail side, in pixels: a 12 rem grid cover (264 px with a 15 px
-/// font on a 1.5x screen), the 16 rem cover of the album page a little
-/// soft. In memory a texture is four bytes a pixel, and a grid keeps a
-/// few hundred alive.
 pub const SIZE: u32 = 320;
 
-/// Textures kept, about 400 KB each (more with their mipmaps): more than
-/// a big window's grid shows at once.
 const KEEP: usize = 400;
 
 pub fn cache_dir() -> PathBuf {
     crate::dirs::cache().join("mascarpone").join("covers")
 }
 
-/// Where an album's thumbnail is kept: a stable hash of its key.
 pub fn path_for(key: &str) -> PathBuf {
     cache_dir().join(format!("{}.jpg", hash(key)))
 }
 
-/// A stable hash of a name, for a file name: FNV-1a, 16 hex digits.
 pub fn hash(name: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in name.bytes() {
@@ -49,8 +31,6 @@ pub fn hash(name: &str) -> String {
     format!("{h:016x}")
 }
 
-/// Decodes a picture as mpd gave it and writes the thumbnail. Slow, for a
-/// blocking task.
 pub fn thumbnail(bytes: &[u8], path: &Path) -> Result<()> {
     let image = image::load_from_memory(bytes)?.thumbnail(SIZE, SIZE).into_rgb8();
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -62,15 +42,12 @@ pub fn thumbnail(bytes: &[u8], path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A picture as the texture wants it.
 struct Pixels {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
 }
 
-/// A thumbnail read and decoded; a face cut round (a square from its
-/// middle, a soft edge).
 fn decode(path: &Path, round: bool) -> Option<Pixels> {
     let image = image::open(path).ok()?;
     if !round {
@@ -91,16 +68,11 @@ fn decode(path: &Path, round: bool) -> Option<Pixels> {
 }
 
 enum Slot {
-    /// Asked: of mpd, of the net, or of the decoders.
     Waiting,
-    /// The picture, last shown at that frame.
     Ready(Texture, u64),
-    /// There is none: the placeholder.
     None,
 }
 
-/// What is known of an artist: the words, the article's url, whether the
-/// net gave a face.
 #[derive(Clone, Default)]
 pub struct Known {
     pub bio: Option<String>,
@@ -108,17 +80,13 @@ pub struct Known {
     portrait: bool,
 }
 
-/// The pictures as textures, by name (`c:` an album's key, `a:` an
-/// artist's), and what is known of the artists.
 pub struct Pictures {
     commands: UnboundedSender<Command>,
     slots: RefCell<HashMap<String, Slot>>,
     frame: Cell<u64>,
     jobs: mpsc::Sender<(String, PathBuf, bool)>,
     done: mpsc::Receiver<(String, Option<Pixels>)>,
-    /// Decoded, taken off the channel before a wait, for the next frame.
     early: RefCell<Vec<(String, Option<Pixels>)>>,
-    /// Textures to drop at the next frame's start.
     dropped: RefCell<Vec<Texture>>,
     asked: RefCell<HashSet<String>>,
     known: RefCell<HashMap<String, Known>>,
@@ -156,8 +124,6 @@ impl Pictures {
         }
     }
 
-    /// At the start of a frame: the decoded pictures made textures, the
-    /// least recently shown dropped when too many. True when one came.
     pub fn begin_frame(&self) -> bool {
         let frame = self.frame.get() + 1;
         self.frame.set(frame);
@@ -169,7 +135,6 @@ impl Pictures {
         let early = std::mem::take(&mut *self.early.borrow_mut());
         for (name, pixels) in early.into_iter().chain(self.done.try_iter()) {
             any = true;
-            // dropped meanwhile (a retry): not wanted any more
             let Some(slot) = slots.get_mut(&name) else { continue };
             *slot = match pixels {
                 Some(p) => Slot::Ready(rl::texture(&p.rgba, p.width, p.height), frame),
@@ -181,7 +146,6 @@ impl Pictures {
             let mut ages: Vec<(u64, String)> = slots.iter().filter_map(|(k, s)| if let Slot::Ready(_, at) = s { Some((*at, k.clone())) } else { None }).collect();
             ages.sort();
             for (at, key) in ages.into_iter().take(ready - KEEP) {
-                // not one drawn on the last frame
                 if at + 1 >= frame {
                     break;
                 }
@@ -193,14 +157,12 @@ impl Pictures {
         any
     }
 
-    /// A picture decoded and not yet shown: no waiting for events then.
     pub fn news(&self) -> bool {
         let mut early = self.early.borrow_mut();
         early.extend(self.done.try_iter());
         !early.is_empty()
     }
 
-    /// Pictures asked and not yet in.
     pub fn waiting(&self) -> usize {
         let pictures = self.slots.borrow().values().filter(|s| matches!(s, Slot::Waiting)).count();
         let known = self.known.borrow();
@@ -223,8 +185,6 @@ impl Pictures {
         let _ = self.jobs.send((name, path, round));
     }
 
-    /// The album's cover, or none yet (the placeholder): asked the first
-    /// time, read from the cache when it is there, else of mpd.
     pub fn cover(&self, key: &str, uri: &str) -> Option<Texture> {
         let name = format!("c:{key}");
         if self.slots.borrow().contains_key(&name) {
@@ -240,9 +200,6 @@ impl Pictures {
         None
     }
 
-    /// Like `cover`, but a thumbnail already on disk is read here and now:
-    /// for the picker's few small covers, refilled at every keystroke,
-    /// where a frame of the disc before the cover would flicker.
     pub fn cover_now(&self, key: &str, uri: &str) -> Option<Texture> {
         let name = format!("c:{key}");
         if !self.slots.borrow().contains_key(&name) {
@@ -255,8 +212,6 @@ impl Pictures {
         self.cover(key, uri)
     }
 
-    /// mpd's answer on a cover: its thumbnail, or none; a failed one is
-    /// asked again the next time it shows.
     pub fn cover_arrived(&self, key: &str, path: Option<&Path>, failed: bool) {
         let name = format!("c:{key}");
         match (path, failed) {
@@ -276,7 +231,6 @@ impl Pictures {
         }
     }
 
-    /// The artist's face, or none (yet): asked the first time.
     pub fn face(&self, name: &str) -> Option<Texture> {
         let portrait = match self.known.borrow().get(name) {
             Some(k) => k.portrait,
@@ -296,7 +250,6 @@ impl Pictures {
         None
     }
 
-    /// The artist's words and the article's url, once they are in.
     pub fn words(&self, name: &str) -> Option<Known> {
         let known = self.known.borrow().get(name).cloned();
         if known.is_none() {
@@ -309,8 +262,6 @@ impl Pictures {
         self.known.borrow_mut().insert(name.to_owned(), Known { bio: info.bio.clone(), url: info.wikipedia.clone(), portrait: info.portrait });
     }
 
-    /// A new try from the net for an artist: what is kept forgotten (on
-    /// mpd's thread, which has the database), asked again.
     pub fn retry(&self, name: &str) {
         self.known.borrow_mut().remove(name);
         if let Some(Slot::Ready(t, _)) = self.slots.borrow_mut().remove(&format!("a:{name}")) {

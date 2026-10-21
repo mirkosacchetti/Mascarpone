@@ -221,6 +221,28 @@ impl AnalysisIndexv1 {
 /// The number of features used in the latest `Analysis` version.
 pub const NUMBER_FEATURES: usize = FeaturesVersion::LATEST.feature_count();
 
+/// What the descriptors saw along a song, window by window, before
+/// [Analysis] summed it up: for the shape of a song over time, which
+/// the analysis alone, means and deviations, does not tell.
+///
+/// All positions and hops are in samples at [SAMPLE_RATE].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Series {
+    /// The mean energy (linear, `level_lin`) of every chunk of
+    /// `LoudnessDesc::WINDOW_SIZE` (1024) samples.
+    pub levels: Vec<f32>,
+    /// The spectral centroid in Hz of every window, one per
+    /// `SpectralDesc::HOP_SIZE` (128) samples.
+    pub centroids: Vec<f32>,
+    /// The chroma of every frame, one per `ChromaDesc::HOP` (2205)
+    /// samples: 12 values summing to one, from C up by semitones.
+    pub chroma: Vec<Vec<f32>>,
+    /// The positions of the beats found.
+    pub beats: Vec<usize>,
+    /// The positions of the onsets found, beats or not.
+    pub onsets: Vec<usize>,
+}
+
 /// Object holding the results of the song's analysis.
 ///
 /// Only use it if you want to have an in-depth look of what is
@@ -235,6 +257,7 @@ pub const NUMBER_FEATURES: usize = FeaturesVersion::LATEST.feature_count();
 /// [this document](https://lelele.io/thesis.pdf), that contains a description
 /// on most of the features, except the chroma ones, which are documented
 /// directly in this code.
+
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Default, PartialEq, Clone)]
 pub struct Analysis {
@@ -414,6 +437,23 @@ impl Song {
         sample_array: &[f32],
         analysis_options: &AnalysisOptions,
     ) -> BlissResult<Analysis> {
+        Self::analyze_series_with_options(sample_array, analysis_options).map(|(a, _)| a)
+    }
+
+    /// The same as [Song::analyze], keeping also what the descriptors saw
+    /// along the song, window by window, before summing it up: see
+    /// [Series].
+    #[cfg(feature = "analysis")]
+    pub fn analyze_series(sample_array: &[f32]) -> BlissResult<(Analysis, Series)> {
+        Self::analyze_series_with_options(sample_array, &AnalysisOptions::default())
+    }
+
+    /// [Song::analyze_series] with options, as [Song::analyze_with_options].
+    #[cfg(feature = "analysis")]
+    pub fn analyze_series_with_options(
+        sample_array: &[f32],
+        analysis_options: &AnalysisOptions,
+    ) -> BlissResult<(Analysis, Series)> {
         let largest_window = vec![
             BPMDesc::WINDOW_SIZE,
             ChromaDesc::WINDOW_SIZE,
@@ -429,8 +469,8 @@ impl Song {
             )));
         }
 
-        thread::scope(|s| -> BlissResult<Analysis> {
-            let child_tempo = s.spawn(|| -> BlissResult<f32> {
+        thread::scope(|s| -> BlissResult<(Analysis, Series)> {
+            let child_tempo = s.spawn(|| -> BlissResult<(f32, Vec<usize>, Vec<usize>)> {
                 let mut tempo_desc = BPMDesc::new(SAMPLE_RATE)?;
                 let windows = sample_array
                     .windows(BPMDesc::WINDOW_SIZE)
@@ -439,21 +479,23 @@ impl Song {
                 for window in windows {
                     tempo_desc.do_(window)?;
                 }
-                Ok(tempo_desc.get_value())
+                let value = tempo_desc.get_value();
+                Ok((value, tempo_desc.beats().to_vec(), tempo_desc.onsets().to_vec()))
             });
 
-            let child_chroma = s.spawn(|| -> BlissResult<Vec<f32>> {
+            let child_chroma = s.spawn(|| -> BlissResult<(Vec<f32>, Vec<Vec<f32>>)> {
                 let mut chroma_desc = ChromaDesc::new(SAMPLE_RATE, 12);
                 chroma_desc.do_(sample_array)?;
+                let frames = chroma_desc.frames();
                 if analysis_options.features_version == FeaturesVersion::Version1 {
-                    Ok(chroma_desc.get_values_version_1()?)
+                    Ok((chroma_desc.get_values_version_1()?, frames))
                 } else {
-                    Ok(chroma_desc.get_values()?)
+                    Ok((chroma_desc.get_values()?, frames))
                 }
             });
 
             #[allow(clippy::type_complexity)]
-            let child_timbral = s.spawn(|| -> BlissResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+            let child_timbral = s.spawn(|| -> BlissResult<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
                 let mut spectral_desc = SpectralDesc::new(SAMPLE_RATE)?;
                 let windows = sample_array
                     .windows(SpectralDesc::WINDOW_SIZE)
@@ -461,10 +503,11 @@ impl Song {
                 for window in windows {
                     spectral_desc.do_(window)?;
                 }
+                let centroids = spectral_desc.centroids().to_vec();
                 let centroid = spectral_desc.get_centroid();
                 let rolloff = spectral_desc.get_rolloff();
                 let flatness = spectral_desc.get_flatness();
-                Ok((centroid, rolloff, flatness))
+                Ok((centroid, rolloff, flatness, centroids))
             });
 
             let child_zcr = s.spawn(|| -> BlissResult<f32> {
@@ -473,22 +516,30 @@ impl Song {
                 Ok(zcr_desc.get_value())
             });
 
-            let child_loudness = s.spawn(|| -> BlissResult<Vec<f32>> {
+            let child_loudness = s.spawn(|| -> BlissResult<(Vec<f32>, Vec<f32>)> {
                 let mut loudness_desc = LoudnessDesc::default();
                 let windows = sample_array.chunks(LoudnessDesc::WINDOW_SIZE);
 
                 for window in windows {
                     loudness_desc.do_(window);
                 }
-                Ok(loudness_desc.get_value())
+                let levels = loudness_desc.values.clone();
+                Ok((loudness_desc.get_value(), levels))
             });
 
             // Non-streaming approach for that one
-            let tempo = child_tempo.join().unwrap()?;
-            let chroma = child_chroma.join().unwrap()?;
-            let (centroid, rolloff, flatness) = child_timbral.join().unwrap()?;
-            let loudness = child_loudness.join().unwrap()?;
+            let (tempo, beats, onsets) = child_tempo.join().unwrap()?;
+            let (chroma, chroma_frames) = child_chroma.join().unwrap()?;
+            let (centroid, rolloff, flatness, centroids) = child_timbral.join().unwrap()?;
+            let (loudness, levels) = child_loudness.join().unwrap()?;
             let zcr = child_zcr.join().unwrap()?;
+            let series = Series {
+                levels,
+                centroids,
+                chroma: chroma_frames,
+                beats,
+                onsets,
+            };
 
             let mut result = vec![tempo, zcr];
             result.extend_from_slice(&centroid);
@@ -503,7 +554,7 @@ impl Song {
                         .to_string(),
                 ));
             };
-            Analysis::new(result, analysis_options.features_version)
+            Ok((Analysis::new(result, analysis_options.features_version)?, series))
         })
     }
 

@@ -1,9 +1,3 @@
-//! The library as Mascarpone sees it: albums with their tracks, artists with
-//! their albums, built from mpd's listing of every song, and
-//! the playlists read from the m3u files in the music folder's
-//! `Playlists`. Plain data, built on the mpd thread and shared with the
-//! window as is.
-
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard};
@@ -20,31 +14,22 @@ pub struct Track {
     pub disc: u64,
     pub number: u64,
     pub duration: Option<Duration>,
-    /// MusicBrainz's id of the recording, from the file's tags.
     pub mbid: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct Album {
-    /// Album artist and title together: what tells one album from another,
-    /// and the name of its cover in the cache. For a folder of loose
-    /// tracks, an empty artist, "folder" and the folder's path.
     pub key: String,
     pub title: String,
     pub artist: String,
     pub year: Option<String>,
     pub tracks: Vec<Track>,
-    /// Not an album but a folder: the tracks there without an album tag.
     pub loose: bool,
-    /// MusicBrainz's id of the release, from the files' tags.
     pub mbid: Option<String>,
-    /// MusicBrainz's ids of the album artist, from the tags: one, or
-    /// one a member when the name is a collaboration's.
     pub artist_mbids: Vec<String>,
 }
 
 impl Album {
-    /// A file of the album, the one mpd is asked the cover for.
     pub fn cover_uri(&self) -> &str {
         &self.tracks[0].uri
     }
@@ -57,7 +42,6 @@ impl Album {
         self.tracks.iter().map(|t| t.uri.clone()).collect()
     }
 
-    /// Discs in the album, 1 when untagged.
     pub fn discs(&self) -> u64 {
         self.tracks.iter().map(|t| t.disc).max().unwrap_or(0).max(1)
     }
@@ -66,15 +50,10 @@ impl Album {
 #[derive(Debug)]
 pub struct Artist {
     pub name: String,
-    /// Indexes into `Library::albums`.
     pub albums: Vec<usize>,
-    /// MusicBrainz's ids from the albums' tags: one, the artist's; more,
-    /// the members' of a collaboration; none, untagged.
     pub mbids: Vec<String>,
 }
 
-/// A playlist's entry: the track as the library knows it, or, for a file
-/// the library does not have, just its name from the path.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub uri: String,
@@ -82,7 +61,6 @@ pub struct Entry {
     pub artist: String,
     pub album: Option<usize>,
     pub duration: Option<Duration>,
-    /// In the library, so mpd can play it.
     pub found: bool,
 }
 
@@ -98,7 +76,6 @@ impl Playlist {
         self.entries.iter().filter_map(|e| e.duration).sum()
     }
 
-    /// The playable entries' uris, in order.
     pub fn uris(&self) -> Vec<String> {
         self.entries.iter().filter(|e| e.found).map(|e| e.uri.clone()).collect()
     }
@@ -112,18 +89,12 @@ impl Playlist {
 pub struct Library {
     pub albums: Vec<Album>,
     pub artists: Vec<Artist>,
-    /// Behind a lock: they are read again when Mascarpone writes one, the
-    /// rest of the library stays.
     playlists: RwLock<Vec<Playlist>>,
-    /// Album index by key, artist index by name, a track's place by uri.
     album_by_key: HashMap<String, usize>,
     artist_by_name: HashMap<String, usize>,
     by_uri: HashMap<String, (usize, usize)>,
 }
 
-/// Where the music is, mpd's `music_directory` too: the configuration's,
-/// else the user's Music folder. The playlists are m3u files in their
-/// folder, by default `Playlists` inside it.
 pub fn music_dir() -> PathBuf {
     crate::config::get().music.clone()
 }
@@ -134,7 +105,6 @@ pub fn playlists_dir() -> PathBuf {
 
 const UNKNOWN_ARTIST: &str = "Unknown artist";
 
-/// The artist an album is filed under: the album artist, else the artist.
 fn album_artist(song: &Song) -> &str {
     song.album_artists()
         .first()
@@ -143,8 +113,6 @@ fn album_artist(song: &Song) -> &str {
         .unwrap_or(UNKNOWN_ARTIST)
 }
 
-/// A tag's MusicBrainz ids: a value each, or several in one separated
-/// by a slash or a semicolon as some taggers write them, each once.
 fn ids(song: &Song, tag: &Tag) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for value in song.tags.get(tag).into_iter().flatten() {
@@ -157,9 +125,6 @@ fn ids(song: &Song, tag: &Tag) -> Vec<String> {
     out
 }
 
-/// An artist's ids from their albums': when an album names several,
-/// the name is a collaboration's and the ids are its members', all of
-/// them; else the one most albums agree on (a tagger's slip aside).
 fn artist_mbids<'a>(albums: impl Iterator<Item = &'a [String]> + Clone) -> Vec<String> {
     if albums.clone().any(|ids| ids.len() > 1) {
         let mut all: Vec<String> = Vec::new();
@@ -180,8 +145,6 @@ fn artist_mbids<'a>(albums: impl Iterator<Item = &'a [String]> + Clone) -> Vec<S
     count.into_iter().max_by_key(|(_, n)| *n).map(|(id, _)| vec![id.clone()]).unwrap_or_default()
 }
 
-/// The key of the album a song belongs to; for a song without an album,
-/// the folder it is in, which stands in for one.
 pub fn album_key(song: &Song) -> Option<String> {
     match song.album() {
         Some(album) => Some(format!("{}\u{1f}{}", album_artist(song), album)),
@@ -189,7 +152,6 @@ pub fn album_key(song: &Song) -> Option<String> {
     }
 }
 
-/// What a name sorts by: as written, case aside ("The Bad Plus" under T).
 fn sort_name(name: &str) -> String {
     name.to_lowercase()
 }
@@ -206,7 +168,6 @@ impl Library {
                     key,
                     title: match song.album() {
                         Some(album) => album.to_owned(),
-                        // the folder's name, or the root's
                         None => song
                             .file_path()
                             .parent()
@@ -228,8 +189,6 @@ impl Library {
                 album.mbid = ids(&song, &Tag::MusicBrainzReleaseId).pop();
             }
             if album.artist_mbids.is_empty() {
-                // the album artist's; the artist's when the album artist
-                // is only the artist standing in
                 let tag = if song.album_artists().is_empty() { Tag::MusicBrainzArtistId } else { Tag::MusicBrainzReleaseArtistId };
                 album.artist_mbids = ids(&song, &tag);
             }
@@ -239,7 +198,6 @@ impl Library {
                     .get(&Tag::OriginalDate)
                     .or_else(|| song.tags.get(&Tag::Date))
                     .and_then(|v| v.first());
-                // a date of 0000 is no date
                 album.year = date.map(|d| d.chars().take(4).collect::<String>()).filter(|y| y.parse::<u32>().is_ok_and(|n| n > 0));
             }
             let (disc, number) = song.number();
@@ -263,9 +221,7 @@ impl Library {
         Library::assemble(albums)
     }
 
-    /// The library from its albums: sorted, indexed, the playlists read.
     fn assemble(mut albums: Vec<Album>) -> Library {
-        // albums by title; artists by name, each one's albums by year
         albums.sort_by_cached_key(|a| (sort_name(&a.title), sort_name(&a.artist)));
         let mut by_artist: HashMap<&str, Vec<usize>> = HashMap::new();
         for (i, album) in albums.iter().enumerate() {
@@ -290,7 +246,6 @@ impl Library {
         library
     }
 
-    /// A library for the tests: albums as (artist, title, tracks).
     #[cfg(test)]
     pub fn of(albums: &[(&str, &str, usize)]) -> Library {
         let albums = albums
@@ -313,7 +268,6 @@ impl Library {
         self.playlists.read().unwrap()
     }
 
-    /// The playlist files read again, against this library's tracks.
     pub fn read_playlists(&self) -> Vec<Playlist> {
         read_playlists(self, &music_dir(), &playlists_dir())
     }
@@ -330,13 +284,10 @@ impl Library {
         self.album_by_key.get(key).copied()
     }
 
-    /// The album a track is in, and its place there.
     pub fn place(&self, uri: &str) -> Option<(usize, usize)> {
         self.by_uri.get(uri).copied()
     }
 
-    /// The folder an album lives in alone: all its tracks there, no other
-    /// album's. Where a cover file can go without lying to anyone.
     pub fn own_folder(&self, key: &str) -> Option<PathBuf> {
         let album = self.album_by_key(key)?;
         let folder = Path::new(&album.tracks[0].uri).parent()?.to_path_buf();
@@ -363,9 +314,6 @@ impl Library {
     }
 }
 
-/// The m3u files of `dir`, by name. An entry's path is relative to the
-/// file (or absolute); inside the music folder it is an mpd uri, and the
-/// library's track when it has it.
 fn read_playlists(library: &Library, music: &Path, dir: &Path) -> Vec<Playlist> {
     let Ok(files) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut playlists: Vec<Playlist> = files
@@ -412,7 +360,6 @@ fn read_playlists(library: &Library, music: &Path, dir: &Path) -> Vec<Playlist> 
     playlists
 }
 
-/// The path without `.` and `..`, lexically.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
@@ -427,7 +374,6 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// m:ss, or h:mm:ss from an hour up.
 pub fn clock(d: Duration) -> String {
     let s = d.as_secs();
     if s >= 3600 {

@@ -54,6 +54,12 @@ impl SpectralDesc {
      *
      * The value range is between 0 and `sample_rate / 2`.
      */
+    /// The spectral centroid of every window, in Hz, one per `HOP_SIZE`
+    /// samples, as `do_` saw them.
+    pub fn centroids(&self) -> &[f32] {
+        &self.values_centroid
+    }
+
     pub fn get_centroid(&mut self) -> Vec<f32> {
         vec![
             self.normalize(mean(&self.values_centroid)),

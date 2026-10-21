@@ -127,7 +127,7 @@ use thiserror::Error;
 
 #[cfg(feature = "analysis")]
 pub use song::decoder;
-pub use song::{Analysis, AnalysisIndex, AnalysisOptions, Song, NUMBER_FEATURES};
+pub use song::{Analysis, AnalysisIndex, AnalysisOptions, Series, Song, NUMBER_FEATURES};
 
 use crate::playlist::mahalanobis_distance_builder;
 

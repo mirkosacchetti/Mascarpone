@@ -1,7 +1,3 @@
-//! Where things are, the XDG way: the home, the cache, the state, the
-//! Music folder (as `xdg-user-dirs` names it); and the local time, for
-//! names stamped with it.
-
 use std::path::PathBuf;
 
 pub fn home() -> PathBuf {
@@ -35,7 +31,6 @@ pub fn runtime() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
 }
 
-/// The Music folder: `XDG_MUSIC_DIR` in `user-dirs.dirs`, else `~/Music`.
 pub fn music() -> PathBuf {
     let dirs = std::fs::read_to_string(config().join("user-dirs.dirs")).unwrap_or_default();
     for line in dirs.lines() {
@@ -45,7 +40,6 @@ pub fn music() -> PathBuf {
             Some(rest) => home().join(rest.trim_start_matches('/')),
             None => PathBuf::from(value),
         };
-        // the home itself means none, as xdg-user-dirs has it
         if path.is_absolute() && path != home() {
             return path;
         }
@@ -53,7 +47,6 @@ pub fn music() -> PathBuf {
     home().join("Music")
 }
 
-/// The local time in strftime's `format`.
 pub fn now(format: &str) -> String {
     let format = std::ffi::CString::new(format).unwrap_or_default();
     let mut buf = [0u8; 64];

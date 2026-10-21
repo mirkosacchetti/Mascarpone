@@ -1,14 +1,7 @@
-//! The playing mark: four small bars that bounce while the song plays
-//! and stand still while it is paused, next to the track in a list. The
-//! only thing that moves on its own: while one is drawn bouncing, the
-//! window draws again every 90 ms; only with the focus, so that a window
-//! hidden in the scratchpad (or left aside) does not keep drawing.
-
 use crate::rl;
 use crate::ui::{self, Ui, R};
 
 const BARS: usize = 4;
-/// The phase's step every 90 ms.
 const STEP: f64 = 0.35;
 const TICK: f64 = 0.09;
 

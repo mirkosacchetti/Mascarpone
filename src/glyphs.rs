@@ -1,9 +1,3 @@
-//! Every icon is a glyph of the font, the Nerd Font lintel and Mascarpone
-//! write with (Material Design Icons, `nf-md-*`), drawn by its ink in
-//! the middle of the room it is given (`Ui::icon`); a cover's or
-//! a portrait's placeholder is one of them on the cover's shade.
-
-/// The app: a bowl with a spoon (bowl-mix).
 pub const APP: &str = "\u{f0617}";
 pub const ALBUM: &str = "\u{f0025}";
 pub const TRACK: &str = "\u{f075a}";
@@ -35,10 +29,7 @@ pub const FOLDER: &str = "\u{f1359}";
 pub const CONNECTED: &str = "\u{f0318}";
 pub const DISCONNECTED: &str = "\u{f0319}";
 pub const REFRESH: &str = "\u{f05c2}";
-/// A command, in the commands' picker: a keyboard.
 pub const COMMAND: &str = "\u{f030c}";
-/// The radio: the queue that goes on by itself, by likeness.
 pub const RADIO: &str = "\u{f043c}";
 
-/// Every glyph, for the faces that draw only them.
 pub const ALL: &[&str] = &[APP, ALBUM, TRACK, ARTIST, PLAYLIST, QUEUE, ADD, QUEUE_ADD, REPEAT, REPEAT_ONE, PREVIOUS, NEXT, PLAY, PAUSE, SAVE, CLEAR, UP, DOWN, REMOVE, SHUFFLE, DELETE, MISSING, YEAR, LENGTH, RETRY, WIKIPEDIA, NOTHING, FOLDER, CONNECTED, DISCONNECTED, REFRESH, COMMAND, RADIO];

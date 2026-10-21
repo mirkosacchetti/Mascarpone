@@ -1,8 +1,3 @@
-//! The window: the header with the app and the tabs over every page,
-//! the player under every page, the page between them (the root page's
-//! tab, or a page opened over it), the word under the tabs, and a dialog
-//! over all of it when one is up.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,8 +38,6 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     }
 }
 
-// the header
-
 fn header_height(ui: &Ui) -> f32 {
     rem(0.5) * 2.0 + tab_height(ui)
 }
@@ -53,12 +46,6 @@ fn tab_height(ui: &Ui) -> f32 {
     rem(0.25) * 2.0 + ui.line(Style::Title)
 }
 
-/// The app's mark and name on the left, written like a tab's; the tabs
-/// in the middle of the window, each its key (1 to 4) and its glyph,
-/// lit while on: the page's kind when a page is up (an album's page
-/// lights Albums, whatever tab it was opened over), else the tab. A
-/// click, even on the tab already on, comes back to its list, dealt
-/// again.
 fn draw_header(app: &App, ui: &mut Ui, h: f32) {
     let lit = match app.pages.last() {
         Some(Page::Album(_)) => Tab::Albums,
@@ -97,8 +84,6 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
         x += w + rem(0.25);
     }
 
-    // the right: the radio's analysis and the artists' links going, as
-    // done of how many, each after its glyph
     let mut right = ui.w - rem(1.0);
     let ly = y + rem(0.25) + ((side - ui.line(Style::Subtitle)) / 2.0).round();
     for (glyph, going) in [(glyphs::ARTIST, app.linking), (glyphs::TRACK, app.analyzing)] {
@@ -115,8 +100,6 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
     }
 }
 
-/// The word under the tabs, top centre, over whatever page is up, about
-/// what is going on: a refresh asked, the library read again, mpd lost.
 fn snack(app: &App, ui: &mut Ui, content: R) {
     let Some((text, until)) = &app.snack else { return };
     if let Some(until) = until {
@@ -129,10 +112,6 @@ fn snack(app: &App, ui: &mut Ui, content: R) {
     ui.text(Style::Label, text, r.x + px, r.y + py, w + 1.0);
 }
 
-// the root page
-
-/// The tab on screen; built again a moment ago, hidden until its
-/// pictures are in (a quarter second at most).
 fn root(app: &mut App, ui: &mut Ui, area: R) {
     let t = app.shown_at.elapsed();
     let ready = (t >= Duration::from_millis(32) && app.pictures.waiting() == 0) || t >= Duration::from_millis(250);
@@ -166,7 +145,6 @@ fn root(app: &mut App, ui: &mut Ui, area: R) {
         Tab::Queue => {
             let mut queue = app.queue.take().unwrap_or_else(|| {
                 let mut t = Tracks::queue(app);
-                // the same place over a rebuild
                 if let Some(old) = &app.queue_scroll {
                     t.scroll = *old;
                     t.centre = false;
@@ -183,20 +161,15 @@ fn root(app: &mut App, ui: &mut Ui, area: R) {
     ui.blocked = blocked;
 }
 
-/// What a grid's cards are.
 pub enum Cards<'a> {
     Albums(&'a Arc<Library>),
     Artists(&'a Arc<Library>),
 }
 
-/// A card's height: the cover, the name, the line under it.
 pub fn card_height(ui: &Ui) -> f32 {
     2.0 * rem(size::PAD) + rem(size::COVER) + 2.0 * rem(0.25) + ui.line(Style::Header) + ui.line(Style::Subtitle)
 }
 
-/// The Albums and Artists tabs: as many cards across as fit the window,
-/// twelve at most, each in the middle of its column; under the pointer
-/// a card is selected.
 fn full_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, area: R) {
     pages::wheel(ui, area, &mut grid.scroll);
     let columns = ((area.w / (size::card() + size::gap())).floor() as usize).clamp(1, 12);
@@ -215,8 +188,6 @@ fn full_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, area: R) {
     pages::scrollbar(ui, area, &grid.scroll);
 }
 
-/// The cards of a grid, `columns` across `x..x + w` from `top`, the
-/// ones in `clip` drawn; returns the grid's height.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, x: f32, w: f32, columns: usize, top: f32, clip: R) -> f32 {
     grid.columns = columns;
@@ -247,15 +218,11 @@ pub fn draw_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, x: f32, 
     rows as f32 * rh
 }
 
-/// A card's buttons: the window's square button, in the bottom right
-/// corner of the card's picture, the `nth` from the corner (0 the
-/// corner), in the accent like a page's Play.
 fn card_button(ui: &mut Ui, picture: R, nth: usize, glyph: &str, sensitive: bool) -> bool {
     let b = ui.square_side();
     ui.square(picture.right() - rem(0.5) - b - nth as f32 * (b + rem(0.5)), picture.bottom() - rem(0.5) - b, glyph, Look::Suggested, sensitive)
 }
 
-/// The play button in the corner; true on a click.
 fn play_button(ui: &mut Ui, picture: R) -> bool {
     card_button(ui, picture, 0, glyphs::PLAY, true)
 }
@@ -268,11 +235,6 @@ fn card_background(ui: &Ui, cell: R, over: bool, selected: bool) {
     }
 }
 
-/// An album's card: the cover, a play button and, to its right, a radio
-/// button on it (on the card under the pointer and on the selected
-/// one), the title,
-/// the artist (a link to their page) and the year. A click opens the
-/// album. True under the pointer.
 fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize, selected: bool) -> bool {
     let album = &library.albums[a];
     let over = ui.hovered(cell);
@@ -284,7 +246,14 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
         Some(t) => ui.picture(t, cover),
         None => ui.placeholder(glyphs::ALBUM, cover, false),
     }
-    // play, and the radio to its right in the corner
+    let (current, playing) = app.current();
+    if current.and_then(|u| library.place(u)).is_some_and(|(on, _)| on == a) {
+        let b = ui.square_side();
+        let badge = R::new(cover.x + rem(0.5), cover.bottom() - rem(0.5) - b, b, b);
+        ui.rounded(badge, rem(ui::CORNER), ui::CARD);
+        crate::bars::draw(ui, badge.inset(b * 0.25, b * 0.25), playing);
+    }
+
     if over || selected {
         if card_button(ui, cover, 1, glyphs::PLAY, true) {
             app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
@@ -307,10 +276,6 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
     over
 }
 
-/// An artist's card: a round portrait as big as a cover (a placeholder
-/// until the picture comes), a radio button on it (on the card under
-/// the pointer and on the selected one), the name, the number of
-/// albums. A click opens the artist.
 fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize, selected: bool) -> bool {
     let artist = &library.artists[i];
     let over = ui.hovered(cell);
@@ -342,11 +307,6 @@ fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize
     over
 }
 
-/// The playlists as cards, two across the column of three album cards:
-/// the name and the facts on the left, on the right the covers of the
-/// first sixteen albums its tracks come from, a play button on them (on
-/// the card under the pointer and on the selected one). A click opens
-/// one; the same keys as the grids.
 fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, area: R) {
     let playlists = library.playlists();
     grid.order = (0..playlists.len()).collect();
@@ -357,7 +317,6 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
     let card_w = ((cw - gap) / 2.0).floor();
     let pad = rem(size::PAD);
     const SIDE: usize = 4;
-    // four tiles and three spaces, a quarter short of the cover
     let (tile, space) = (rem(2.75), rem(0.25));
     let mosaic = SIDE as f32 * tile + (SIDE as f32 - 1.0) * space;
     let left_w = (card_w - 2.0 * pad - rem(0.75) - mosaic).max(rem(2.0));
@@ -374,7 +333,6 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
         })
         .collect();
     let names: Vec<Vec<String>> = playlists.iter().map(|p| header.wrap(&p.name, left_w, 3)).collect();
-    // all as tall as the tallest
     let left_h = names.iter().zip(&facts).map(|(n, f)| n.len() as f32 * lh + rem(0.5) + f.len() as f32 * ls).fold(0.0, f32::max);
     let card_h = 2.0 * pad + left_h.max(mosaic);
     let rh = card_h + gap;
@@ -402,7 +360,6 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
             ui.text(Style::Subtitle, f, cell.x + pad, y, left_w);
             y += ls;
         }
-        // the first sixteen albums, each once, in a 4x4 mosaic
         let mut albums: Vec<usize> = Vec::new();
         for entry in &p.entries {
             if let Some(a) = entry.album {
@@ -423,7 +380,6 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
                 None => ui.placeholder(glyphs::ALBUM, r, false),
             }
         }
-        // on the mosaic, as on an album's cover, the play button
         if (over || i == grid.selected) && p.missing() < p.entries.len() && play_button(ui, R::new(mx, cell.y + pad, mosaic, mosaic)) {
             app.act(Action::Load { source: Source::Playlist { path: p.path.clone() }, uris: p.uris(), start: 0 });
         }

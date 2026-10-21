@@ -1447,4 +1447,17 @@ impl Tempo {
     pub fn get_bpm(&self) -> f32 {
         self.bt.get_bpm()
     }
+
+    /// The position in samples of the last beat found, as
+    /// aubio_tempo_get_last.
+    pub fn get_last_beat(&self) -> usize {
+        self.last_beat
+    }
+
+    /// Whether the peak picker found an onset in the last hop, as
+    /// aubio_tempo_get_last_onset would tell: the onset detection's
+    /// output of `do_`, above zero on an onset.
+    pub fn onset_found(&self) -> bool {
+        self.onset > 0.0
+    }
 }

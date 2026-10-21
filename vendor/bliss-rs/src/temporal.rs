@@ -32,6 +32,9 @@ use noisy_float::prelude::*;
 pub struct BPMDesc {
     tempo: Tempo,
     bpms: Vec<f32>,
+    beats: Vec<usize>,
+    onsets: Vec<usize>,
+    frames: usize,
 }
 
 // TODO>1.0 use the confidence value to discard this descriptor if confidence
@@ -44,6 +47,9 @@ impl BPMDesc {
         Ok(BPMDesc {
             tempo: Tempo::new(BPMDesc::WINDOW_SIZE, BPMDesc::HOP_SIZE, sample_rate)?,
             bpms: Vec::new(),
+            beats: Vec::new(),
+            onsets: Vec::new(),
+            frames: 0,
         })
     }
 
@@ -53,8 +59,24 @@ impl BPMDesc {
         if result > 0.0 {
             let bpm = self.tempo.get_bpm();
             self.bpms.push(bpm);
+            self.beats.push(self.tempo.get_last_beat());
         }
+        if self.tempo.onset_found() {
+            self.onsets.push(self.frames);
+        }
+        self.frames += BPMDesc::HOP_SIZE;
         Ok(())
+    }
+
+    /// The positions in samples of the beats found, in order.
+    pub fn beats(&self) -> &[usize] {
+        &self.beats
+    }
+
+    /// The positions in samples of the onsets found, in order: every
+    /// attack the onset detection picked, beat or not.
+    pub fn onsets(&self) -> &[usize] {
+        &self.onsets
     }
 
     /**
