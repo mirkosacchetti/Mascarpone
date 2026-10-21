@@ -255,8 +255,9 @@ impl App {
     /// A line from another launch, over the socket: `tab albums`,
     /// `tab artists`, `tab playlists`, `tab queue`; `artist <name>`;
     /// `album <key>` (artist, a unit separator, title); `search` (the
-    /// picker on everything); `escape` (a dialog closed, else back a
-    /// page). Anything else is said on stderr.
+    /// picker on everything); `commands` (the commands' picker);
+    /// `escape` (a dialog closed, else back a page). Anything else is
+    /// said on stderr.
     pub fn ask(&mut self, line: &str) {
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         match (word, rest) {
@@ -267,6 +268,7 @@ impl App {
             ("artist", name) if !name.is_empty() => self.act(Action::OpenArtist(name.to_owned())),
             ("album", key) if !key.is_empty() => self.act(Action::OpenAlbum { key: key.to_owned(), track: 0 }),
             ("search", "") => self.act(Action::Picker(Kind::All)),
+            ("commands", "") => self.act(Action::Picker(Kind::Commands)),
             ("escape", "") => {
                 if self.modal.take().is_none() {
                     self.act(Action::Back);

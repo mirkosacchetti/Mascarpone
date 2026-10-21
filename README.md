@@ -7,9 +7,12 @@ a radio: a queue that goes on by itself, each track like the ones
 before it, by bliss's ear and by what the net knows of the artists.
 mpd keeps the music and plays it; Mascarpone is the window on it.
 
-It lives in the scratchpad of sway next to the other players (the
-`for_window` rule on its app id, `cards.random.Mascarpone`); the bar sees
-what plays through mpd-mpris, not through Mascarpone.
+Used and tested on one setup only: Arch Linux, Wayland with sway, a
+local mpd (0.24) with the music in `~/Music`, PipeWire; the bar sees
+what plays through mpd-mpris, not through Mascarpone. Another
+distribution, X11 or another compositor may well work (GLFW opens what
+it finds) but nothing has been tried there. The window's app id is
+`cards.random.Mascarpone`, for a compositor's rules.
 
 A track without an album tag is filed under its folder, which stands in
 for an album, with the folder's name.
@@ -20,7 +23,7 @@ for an album, with the folder's name.
 |---|---|
 | ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
 | ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, a radio from Calibro 35, the song on marked](docs/queue.webp) |
-| ![The picker on everything](docs/picker.webp) | |
+| ![The picker on everything](docs/picker.webp) | ![The commands' picker, every action with its keys](docs/commands.webp) |
 
 ## Build
 
@@ -41,8 +44,8 @@ GLFW, inside raylib, opens Wayland or X11 and EGL at run time; the font
 is found by `fc-match`.
 The window draws only when something changes (a key, the pointer, mpd,
 a picture, the clock), and sleeps in between. On Wayland it draws a
-frame only once the compositor has shown the last one: out of sight (the
-scratchpad hidden) it draws nothing, the clock included.
+frame only once the compositor has shown the last one: out of sight
+(hidden, on another workspace) it draws nothing, the clock included.
 
 ## Configuration
 
@@ -139,8 +142,9 @@ Launched with words while the window is up, Mascarpone sends them to
 it over its socket and ends: `mascarpone tab queue` (or `albums`,
 `artists`, `playlists`), `mascarpone artist Radiohead`, `mascarpone
 album <key>` (the artist, a unit separator, the title), `mascarpone
-search` (the picker on everything), `mascarpone escape` (a dialog
-closed, else back a page). For a script, a screenshot.
+search` (the picker on everything), `mascarpone commands` (the
+commands' picker), `mascarpone escape` (a dialog closed, else back a
+page). For a script, a screenshot.
 
 The player bar at the bottom has the song's title over the time (a
 click or a drag seeks), where the song is and its length at its ends;
@@ -180,8 +184,8 @@ Ctrl+= or Ctrl++ zooms in, Ctrl+- out, Ctrl+0 back to 100%; the zoom is
 kept in `~/.local/state/mascarpone/zoom`. The look is lintel's
 (`src/ui.rs`): palette and font (JetBrainsMono Nerd Font Propo, every
 icon one of its glyphs), flat (no frames, shadows or rounded corners
-but on buttons), no animations, no window buttons, since the window
-lives in the scratchpad. A character the font does not have shows as a
+but on buttons), no animations, no window buttons: the compositor's
+rules place the window. A character the font does not have shows as a
 box: there is no other font to fall back on.
 
 ## Artists from the net
@@ -341,3 +345,38 @@ the queue as well.
   textures; the artists' portraits.
 - `src/dirs.rs`: the XDG folders, the local time.
 - `docs/`: the icon (the launcher's) and the screens in this file.
+
+## References
+
+- [mpd](https://www.musicpd.org/), the Music Player Daemon, and its
+  [protocol](https://mpd.readthedocs.io/en/latest/protocol.html);
+  [mpd_client](https://crates.io/crates/mpd_client), the Rust client
+  used; [mpd-mpris](https://github.com/natsukagami/mpd-mpris) for the bar.
+- [raylib](https://www.raylib.com/) (with GLFW inside), the window and
+  the drawing; [JetBrainsMono Nerd Font](https://www.nerdfonts.com/)
+  and the [Material Design Icons](https://pictogrammers.com/library/mdi/)
+  in it, every icon.
+- [Lollypop](https://gitlab.gnome.org/World/lollypop), whose way of
+  asking the net for pictures and words is followed; lintel, whose look
+  and picker Mascarpone has.
+- [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API), the
+  artists, their relations and the links to
+  [Wikidata](https://www.wikidata.org/wiki/Wikidata:Data_access)
+  (influences, P737; MusicBrainz ids, P434) and
+  [Wikipedia](https://en.wikipedia.org/api/rest_v1/) (the summaries);
+  [TheAudioDB](https://www.theaudiodb.com/api_guide.php), portraits and
+  words; [Deezer](https://developers.deezer.com/api), pictures, covers
+  and related artists; the
+  [Cover Art Archive](https://coverartarchive.org/), covers.
+- [bliss](https://github.com/Polochon-street/bliss-rs), the song
+  analysis for the radio, and its [blissify](https://github.com/Polochon-street/blissify-rs),
+  the same idea as a command for mpd; [symphonia](https://github.com/pdeljanov/Symphonia),
+  the decoding in it.
+- [YAMNet](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet),
+  Google's AudioSet classifier, in ONNX from
+  [audiomagic/yamnet-onnx](https://huggingface.co/audiomagic/yamnet-onnx);
+  [Essentia's models](https://essentia.upf.edu/models.html), the
+  voice/instrumental head over it (CC BY-NC-SA 4.0);
+  [tract](https://github.com/sonos/tract), the ONNX runtime in Rust.
+- [SQLite](https://sqlite.org/) through
+  [rusqlite](https://crates.io/crates/rusqlite), the database.
