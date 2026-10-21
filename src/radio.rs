@@ -14,11 +14,12 @@
 //! whose tracks together are what the path starts from, none of them
 //! played; or from an artist, twenty of whose tracks open it at random,
 //! and whose tracks are all it plays. Then, whenever fewer than five
-//! tracks remain after the song on, it adds twenty: four sub-blocks of
-//! five, each an arc from the seed, always from the seed and never from
-//! what played last (the equilibrium, the break, the adventure, the
-//! resolution, the new equilibrium, a track each), each track the
-//! nearest to its part's shift of the seed's vector, one of the six
+//! tracks remain after the song on, it adds twenty: an arc from the
+//! seed, always from the seed and never from what played last (the
+//! equilibrium, the break, the adventure, the resolution, the new
+//! equilibrium, four tracks each, each part passing into the next a
+//! quarter at a time), each track the nearest to the seed's vector
+//! shifted for its place in the arc, one of the six
 //! nearest (the nearer the likelier: the chance is what keeps it
 //! varied), never one already in the queue, never one more vocal than
 //! where the radio started (from an instrumental, instrumentals only).
@@ -48,6 +49,12 @@ pub const STEP: usize = 20;
 pub const LOW: usize = 5;
 /// A step goes to one of this many nearest tracks.
 const NEAREST: usize = 6;
+/// How many tracks a part of the arc lasts, the passage to the next
+/// part spread over them: five parts of four, a block.
+const PER_PART: usize = STEP / ARC.len();
+/// The radio picks no track longer than this (a whole side, a live
+/// set): the seed, if it is, plays as it is.
+const LONGEST: Duration = Duration::from_secs(15 * 60);
 /// How much a link to the last tracks' artists shortens a distance: by
 /// this much of it, for a full link.
 const PULL: f32 = 0.35;
@@ -242,8 +249,17 @@ impl Radio {
                 }
             }
             self.library = Some(library.clone());
-            if let Err(e) = self.db.lock().unwrap().write_library(&library) {
-                eprintln!("radio: {e}");
+            {
+                let mut db = self.db.lock().unwrap();
+                if let Err(e) = db.write_library(&library) {
+                    eprintln!("radio: {e}");
+                }
+                // the writing may have an artist asked about again: one
+                // whose tags name another than the net found
+                match db.linked() {
+                    Ok(a) => self.artists = a,
+                    Err(e) => eprintln!("radio: {e}"),
+                }
             }
             self.ask_links(&library);
             let Some(todo) = self.diff(&library) else { continue };
@@ -386,7 +402,7 @@ impl Radio {
     fn ask_links(&mut self, library: &Library) {
         let names: HashSet<&str> = library.artists.iter().map(|a| a.name.as_str()).collect();
         self.artists.retain(|n, _| names.contains(n.as_str()));
-        let missing: Vec<String> = library.artists.iter().filter(|a| !self.artists.contains_key(&a.name)).map(|a| a.name.clone()).collect();
+        let missing: Vec<(String, Vec<String>)> = library.artists.iter().filter(|a| !self.artists.contains_key(&a.name)).map(|a| (a.name.clone(), a.mbids.clone())).collect();
         self.linking = (0, missing.len());
         self.out.send(Event::Linking { done: 0, total: missing.len() });
         if !missing.is_empty() {
@@ -476,7 +492,7 @@ pub fn opening(library: &Library, seed: &Seed) -> Vec<String> {
         Seed::Track(uri) => library.place(uri).map(|_| vec![uri.clone()]).unwrap_or_default(),
         Seed::Album(_) => Vec::new(),
         Seed::Artist(name) => {
-            let mut theirs = own_tracks(library, name);
+            let mut theirs: Vec<String> = own_tracks(library, name).into_iter().filter(|u| fits(library, u)).collect();
             fastrand::shuffle(&mut theirs);
             theirs.truncate(STEP);
             theirs
@@ -496,6 +512,25 @@ fn seed_vectors(library: &Library, vectors: &Vectors, seed: &Seed) -> Vec<Full> 
 }
 
 impl Vectors {
+    /// How spread each feature is over the library: its standard
+    /// deviation, the unit of the arc's shifts. Over the tracks
+    /// analyzed; the voice's, over the tracks heard.
+    fn spread(&self) -> Full {
+        let mut s = [0f32; N + 2];
+        for i in 0..N + 2 {
+            let xs: Vec<f32> = match i < N {
+                true => self.by_uri.values().map(|v| v[i]).collect(),
+                false => self.voice.values().map(|v| (2.0 * if i == N { v.mean } else { v.share } - 1.0) * VOICE_WEIGHT).collect(),
+            };
+            if xs.is_empty() {
+                continue;
+            }
+            let mean = xs.iter().sum::<f32>() / xs.len() as f32;
+            s[i] = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / xs.len() as f32).sqrt();
+        }
+        s
+    }
+
     /// A track's vector with its voice, if analyzed.
     fn full(&self, uri: &str) -> Option<Full> {
         Some(full(self.by_uri.get(uri)?, self.voice.get(uri)))
@@ -514,34 +549,61 @@ impl Vectors {
 }
 
 /// Every track of an artist's albums.
+/// Whether a track is short enough for the radio (one of unknown
+/// length is).
+fn fits(library: &Library, uri: &str) -> bool {
+    library.place(uri).and_then(|(a, t)| library.albums[a].tracks[t].duration).is_none_or(|d| d <= LONGEST)
+}
+
 fn own_tracks(library: &Library, name: &str) -> Vec<String> {
     library.artist(name).map(|i| library.artists[i].albums.iter().flat_map(|&a| library.albums[a].uris()).collect()).unwrap_or_default()
 }
 
-/// The arc each sub-block of five follows, a track a part: each part a
-/// shift of the seed's vector along bliss's features (by index: tempo
+/// The arc a block follows, four tracks a part: each part a shift of
+/// the seed's vector along bliss's features (by index: tempo
 /// 0, zero-crossings 1, the spectral centroid 2 and its deviation 3,
 /// the rolloff 4 and 5, the flatness 6 and 7, the loudness 8 and 9,
 /// the major, minor, diminished and augmented triads 16 to 19; the
-/// voice's mean and share after them), all in -1..1. The equilibrium:
-/// the seed, steadier. The break: tension, the minor and diminished
-/// up, the loudness and the brightness less steady. The adventure:
-/// faster, louder, brighter, more varied, more vocal. The resolution:
-/// loud and open, the major up. The new equilibrium: slower, quieter,
-/// darker, sparser, less vocal, at peace.
+/// voice's mean and share after them), in standard deviations of the
+/// feature over the library: bliss's -1..1 is a theoretical range, and
+/// a feature the library spans a tenth of would otherwise be shifted
+/// out of it. The equilibrium: the seed, steadier. The break: tension,
+/// the minor and diminished up, the loudness and the brightness less
+/// steady. The adventure: faster, louder, brighter, more varied, more
+/// vocal. The resolution: loud and open, the major up. The new
+/// equilibrium: slower, quieter, darker, sparser, less vocal, at peace.
 const ARC: [(&str, &[(usize, f32)]); 5] = [
-    ("equilibrium", &[(3, -0.15), (5, -0.15), (7, -0.1), (9, -0.15)]),
-    ("break", &[(3, 0.2), (5, 0.15), (7, 0.1), (9, 0.2), (16, -0.1), (17, 0.15), (18, 0.1)]),
-    ("adventure", &[(0, 0.25), (1, 0.15), (2, 0.2), (4, 0.2), (8, 0.3), (9, 0.2), (17, 0.1), (N, 0.3), (N + 1, 0.3)]),
-    ("resolution", &[(8, 0.2), (9, 0.1), (16, 0.25), (17, -0.15), (18, -0.1)]),
-    ("new equilibrium", &[(0, -0.25), (1, -0.15), (2, -0.25), (4, -0.25), (6, -0.1), (8, -0.3), (9, -0.2), (16, 0.1), (N, -0.3), (N + 1, -0.3)]),
+    ("equilibrium", &[(3, -0.5), (5, -0.5), (7, -0.5), (9, -0.5)]),
+    ("break", &[(3, 0.75), (5, 0.75), (7, 0.5), (9, 0.75), (16, -0.5), (17, 0.75), (18, 0.5)]),
+    ("adventure", &[(0, 1.0), (1, 0.75), (2, 1.0), (4, 1.0), (8, 1.0), (9, 0.75), (17, 0.5), (N, 0.75), (N + 1, 0.75)]),
+    ("resolution", &[(8, 0.75), (9, 0.5), (16, 1.0), (17, -0.75), (18, -0.5)]),
+    ("new equilibrium", &[(0, -1.0), (1, -0.75), (2, -1.0), (4, -1.0), (6, -0.5), (8, -1.0), (9, -0.75), (16, 0.5), (N, -0.75), (N + 1, -0.75)]),
 ];
 
-/// The seed's vector shifted for a part of the arc, kept in -1..1.
-fn shifted(centre: &Full, deltas: &[(usize, f32)]) -> Full {
+/// The shift of the arc's track number `at` (from 0, round and round):
+/// its part's, passing into the next part's a quarter a track, so that
+/// the fourth track of the break is three quarters of the way to the
+/// adventure, and the last of the new equilibrium nearly back at the
+/// equilibrium.
+fn shift(at: usize) -> Full {
+    let part = (at / PER_PART) % ARC.len();
+    let t = (at % PER_PART) as f32 / PER_PART as f32;
+    let mut s = [0f32; N + 2];
+    for &(i, d) in ARC[part].1 {
+        s[i] += (1.0 - t) * d;
+    }
+    for &(i, d) in ARC[(part + 1) % ARC.len()].1 {
+        s[i] += t * d;
+    }
+    s
+}
+
+/// The seed's vector shifted, each shift scaled by the feature's
+/// spread, kept in -1..1.
+fn shifted(centre: &Full, deltas: &Full, spread: &Full) -> Full {
     let mut target = *centre;
-    for &(i, d) in deltas {
-        target[i] = (target[i] + d).clamp(-1.0, 1.0);
+    for i in 0..N + 2 {
+        target[i] = (target[i] + deltas[i] * spread[i]).clamp(-1.0, 1.0);
     }
     target
 }
@@ -555,19 +617,20 @@ fn seed_artists<'a>(library: &'a Library, seed: &'a Seed) -> Vec<&'a str> {
     }
 }
 
-/// The next `n` tracks after `queue`: a block of sub-blocks of five,
-/// each an arc from the seed, always from the seed (a track's vector,
-/// the mean of an album's or an artist's), never from what played
-/// last: a track a part, the track nearest the part's shift of the
-/// seed, one of the six nearest, the nearer the likelier.
+/// The next `n` tracks after `queue`: an arc from the seed, always
+/// from the seed (a track's vector, the mean of an album's or an
+/// artist's), never from what played last: four tracks a part, each
+/// part passing into the next over them, each track the nearest to
+/// the seed shifted for its place, one of the six nearest, the nearer
+/// the likelier.
 /// Fewer when there is nothing to go on (the seed not analyzed yet) or
 /// nothing left to choose. The seed's vocality is a ceiling: no track
 /// more vocal than it (one not heard yet passes).
 pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &Seed, queue: &[String], n: usize) -> Vec<String> {
     let ceiling = vectors.vocality(library, seed);
-    let quiet = |u: &str| ceiling.is_none_or(|c| vectors.voice.get(u).is_none_or(|v| v.mean <= c));
+    let quiet = |u: &str| fits(library, u) && ceiling.is_none_or(|c| vectors.voice.get(u).is_none_or(|v| v.mean <= c));
     // the pool: the artist's tracks, or every analyzed track of the
-    // library, under the ceiling
+    // library, under the ceiling and not too long
     let pool: Vec<(&str, Full, usize)> = match seed {
         Seed::Artist(name) => own_tracks(library, name).into_iter().filter_map(|u| library.place(&u).map(|(a, _)| (a, u))).filter_map(|(a, u)| vectors.by_uri.get_key_value(&u).map(|(k, v)| (k.as_str(), full(v, vectors.voice.get(k)), a))).filter(|(u, _, _)| quiet(u)).collect(),
         _ => vectors.by_uri.iter().filter(|(u, _)| quiet(u)).filter_map(|(u, v)| library.place(u).map(|(a, _)| (u.as_str(), full(v, vectors.voice.get(u)), a))).collect(),
@@ -580,6 +643,7 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
         return Vec::new();
     }
     let centre = mean(&seeds);
+    let spread = vectors.spread();
     let artists = seed_artists(library, seed);
     let mut excluded: HashSet<&str> = queue.iter().map(String::as_str).collect();
     // everything played already: the radio starts over, the last ten
@@ -592,40 +656,35 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
             }
         }
     }
-    // four arcs of five: a part each, round and round
+    // the arc, a track at a time
     let mut out: Vec<String> = Vec::with_capacity(n);
-    'arc: loop {
-        for (_, deltas) in ARC {
-            if out.len() == n {
-                break 'arc;
-            }
-            let target = shifted(&centre, deltas);
-            let mut best: Vec<(f32, usize)> = pool
-                .iter()
-                .enumerate()
-                .filter(|(_, (u, _, _))| !excluded.contains(u))
-                .map(|(i, (_, v, a))| (distance(&target, v) * (1.0 - PULL * relations.weight(&library.albums[*a].artist, &artists)), i))
-                .collect();
-            if best.is_empty() {
-                break 'arc;
-            }
-            best.sort_by(|x, y| x.0.total_cmp(&y.0));
-            best.truncate(NEAREST);
-            // the nearer the likelier: the first weighs NEAREST, the last 1
-            let weights: Vec<usize> = (0..best.len()).map(|r| NEAREST - r).collect();
-            let mut pick = fastrand::usize(..weights.iter().sum::<usize>());
-            let mut chosen = 0;
-            for (r, w) in weights.iter().enumerate() {
-                if pick < *w {
-                    chosen = r;
-                    break;
-                }
-                pick -= w;
-            }
-            let (u, _, _) = pool[best[chosen].1];
-            out.push(u.to_owned());
-            excluded.insert(u);
+    for at in 0..n {
+        let target = shifted(&centre, &shift(at), &spread);
+        let mut best: Vec<(f32, usize)> = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, (u, _, _))| !excluded.contains(u))
+            .map(|(i, (_, v, a))| (distance(&target, v) * (1.0 - PULL * relations.weight(&library.albums[*a].artist, &artists)), i))
+            .collect();
+        if best.is_empty() {
+            break;
         }
+        best.sort_by(|x, y| x.0.total_cmp(&y.0));
+        best.truncate(NEAREST);
+        // the nearer the likelier: the first weighs NEAREST, the last 1
+        let weights: Vec<usize> = (0..best.len()).map(|r| NEAREST - r).collect();
+        let mut pick = fastrand::usize(..weights.iter().sum::<usize>());
+        let mut chosen = 0;
+        for (r, w) in weights.iter().enumerate() {
+            if pick < *w {
+                chosen = r;
+                break;
+            }
+            pick -= w;
+        }
+        let (u, _, _) = pool[best[chosen].1];
+        out.push(u.to_owned());
+        excluded.insert(u);
     }
     out
 }
@@ -719,6 +778,61 @@ mod tests {
         // from the vocal one, everything
         let seed = Seed::Track("B/b/1.ogg".into());
         assert_eq!(super::path(&lib, &vectors, &relations, &seed, &["B/b/1.ogg".to_string()], 5).len(), 3);
+    }
+
+    #[test]
+    fn a_shift_is_in_the_library_s_units() {
+        let mut vectors = Vectors::default();
+        // the tempo spans the range, the zero-crossings a tenth of it
+        for i in 0..10 {
+            let mut v = at(-1.0 + 0.2 * i as f32);
+            v[1] = -1.0 + 0.02 * i as f32;
+            vectors.by_uri.insert(format!("A/a/{i}.ogg"), v);
+        }
+        let spread = vectors.spread();
+        assert!((spread[0] / spread[1] - 10.0).abs() < 0.01, "{} and {}", spread[0], spread[1]);
+        assert_eq!(spread[N], 0.0, "no voice heard, no spread");
+        let centre = [0f32; N + 2];
+        let mut deltas = [0f32; N + 2];
+        for i in [0, 1, N] {
+            deltas[i] = 1.0;
+        }
+        let target = shifted(&centre, &deltas, &spread);
+        assert!((target[0] - spread[0]).abs() < 1e-6);
+        assert!((target[0] / target[1] - 10.0).abs() < 0.01);
+        assert_eq!(target[N], 0.0);
+    }
+
+    #[test]
+    fn nothing_longer_than_a_quarter_of_an_hour() {
+        let mut lib = library(&[("A", "a", 1), ("B", "b", 1), ("C", "c", 1)]);
+        let b = lib.album_index("B\u{1f}b").unwrap();
+        lib.albums[b].tracks[0].duration = Some(LONGEST + Duration::from_secs(1));
+        let c = lib.album_index("C\u{1f}c").unwrap();
+        lib.albums[c].tracks[0].duration = Some(LONGEST);
+        let mut vectors = Vectors::default();
+        for u in ["A/a/1.ogg", "B/b/1.ogg", "C/c/1.ogg"] {
+            vectors.by_uri.insert(u.into(), at(0.0));
+        }
+        let relations = Relations::default();
+        let seed = Seed::Track("A/a/1.ogg".into());
+        let path = path(&lib, &vectors, &relations, &seed, &["A/a/1.ogg".to_string()], 5);
+        assert_eq!(path, vec!["C/c/1.ogg".to_string()], "B is too long, C just fits");
+        // an artist's opening too
+        let seed = Seed::Artist("B".into());
+        assert!(opening(&lib, &seed).is_empty());
+    }
+
+    #[test]
+    fn a_part_passes_into_the_next_a_quarter_a_track() {
+        // the tempo (0): the break leaves it, the adventure raises it
+        // by one, the new equilibrium lowers it by one
+        let adventure = 2 * PER_PART;
+        assert_eq!(shift(adventure)[0], 1.0, "the first track of the adventure is all adventure");
+        assert_eq!(shift(adventure - 2)[0], 0.5, "halfway through the break, halfway to the adventure");
+        assert_eq!(shift(adventure - 1)[0], 0.75);
+        assert_eq!(shift(STEP - 1)[0], -0.25, "the last track, nearly back at the equilibrium");
+        assert_eq!(shift(STEP)[0], 0.0, "the next block starts over");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The pages with a list of tracks (an album, a playlist, the queue's
 //! tab) and the artist's page. A tracks page: a picture when there is
-//! one, title, subtitle and facts, Play and Add to queue, then the rows,
+//! one, title, subtitle and facts, the buttons (Play, Add to queue...)
+//! at the head's foot on the right, then the rows,
 //! one selected. Play, and Enter anywhere on the page, plays the list
 //! from the selected row; when that row is the song on, it pauses and
 //! resumes instead, and reads Pause. Up and Down (l and k) move the
@@ -197,8 +198,9 @@ impl Tracks {
 
     /// The master, for its tab: the queue as mpd has it, with where it
     /// came from, the song on selected (or the row selected before); a
-    /// row plays from there. Every row has keys to move it up and down
-    /// and to remove it (L, K, d or Delete on the selected one); on a
+    /// row plays from there. Every row has keys for a radio from the
+    /// track, to move it up and down and to remove it (s, L, K, d or
+    /// Delete on the selected one); on a
     /// radio, Save writes the queue as a playlist file ("Radio" and what
     /// it started from, to be changed), Clear empties it.
     pub fn queue(app: &App) -> Tracks {
@@ -239,7 +241,11 @@ impl Tracks {
             })
             .collect();
         let n = rows.len();
-        let facts = format!("{}  ·  {}", count(n, glyphs::TRACK), length(whole));
+        // a radio has no end: its name alone
+        let facts = match app.master.source {
+            crate::master::Source::Radio { .. } => String::new(),
+            _ => format!("{}  ·  {}", count(n, glyphs::TRACK), length(whole)),
+        };
         // the selection: the one from before a rebuild, else the song on
         let selected = app.queue_row.filter(|&r| r < n).unwrap_or(on);
         let mut t = Tracks::new(library, Plays::Queue, title, subtitle, facts, rows, selected);
@@ -427,8 +433,9 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     let (current, playing) = app.current();
 
     // the head: the picture, and beside it from the top the title (two
-    // lines at most), the subtitle, the facts and the buttons; without a
-    // picture (a playlist, the queue) the words alone
+    // lines at most), the subtitle and the facts; without a picture (a
+    // playlist, the queue) the words alone; the buttons at the foot, on
+    // the right
     let pic = if t.cover.is_some() { head.h } else { 0.0 };
     let fx = x0 + if pic > 0.0 { pic + rem(1.5) } else { 0.0 };
     let fw = (x0 + cw - fx).max(rem(4.0));
@@ -465,17 +472,24 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
             fy += lh;
         }
     }
-    fy += s;
-    ui.text(Style::Subtitle, &t.facts, fx, fy, fw);
-    fy += lh + s;
-    let mut bx = fx;
-    let mut next = |ui: &mut Ui, glyph: &str, look: Look, sensitive: bool| {
-        let x = bx;
-        bx += button + rem(0.5);
-        ui.square(x, fy, glyph, look, sensitive)
-    };
+    if !t.facts.is_empty() {
+        ui.text(Style::Subtitle, &t.facts, fx, fy + s, fw);
+    }
     let any = !t.uris.is_empty();
     let shuffle = t.shuffle.clone().map(|(path, on)| (path, on, if on { Look::Suggested } else { Look::Plain }));
+    // the buttons: at the head's foot, against the right edge, right
+    // over the rows
+    let gap = rem(0.5);
+    let n = match t.plays {
+        Plays::Load(_) => 2 + shuffle.is_some() as usize + t.seed.is_some() as usize,
+        Plays::Queue => 1 + shuffle.is_some() as usize + t.save.is_some() as usize,
+    };
+    let (mut bx, fy) = (x0 + cw - (n as f32 * button + (n - 1) as f32 * gap), head.bottom() - button);
+    let mut next = |ui: &mut Ui, glyph: &str, look: Look, sensitive: bool| {
+        let x = bx;
+        bx += button + gap;
+        ui.square(x, fy, glyph, look, sensitive)
+    };
     match t.plays {
         // play from the selection, a playlist's shuffle, add to the queue
         Plays::Load(_) => {
@@ -591,24 +605,26 @@ fn draw_row(app: &App, t: &mut Tracks, i: usize, r: R, ui: &mut Ui, current: Opt
     let mid = inner.y + inner.h / 2.0;
     let mut clicked_inside = false;
     ui.with_alpha(if playable { 1.0 } else { 0.5 }, |ui| {
-        // the number, four characters wide, right-aligned; the mark over it
+        // the number, centred in four characters; the mark in its place
         let face = ui.face(Style::Subtitle);
         let nw = 4.0 * face.advance('0');
         let ls = face.line;
         let on = row.start.is_some_and(|s| current == Some(t.uris[s].as_str()));
         if on {
             let side = rem(1.0);
-            crate::bars::draw(ui, R::new(inner.x + nw - side, (mid - side / 2.0).round(), side, side), playing);
+            crate::bars::draw(ui, R::new((inner.x + (nw - side) / 2.0).round(), (mid - side / 2.0).round(), side, side), playing);
         } else {
-            ui.text_right(Style::Subtitle, &row.number, inner.x + nw, (mid - ls / 2.0).round());
+            let w = ui.width(Style::Subtitle, &row.number);
+            ui.text(Style::Subtitle, &row.number, (inner.x + (nw - w) / 2.0).round(), (mid - ls / 2.0).round(), nw);
         }
 
-        // the end: the length, then on the queue up, down and out
+        // the end: the length, the radio from the track, then on the
+        // queue up, down and out
         let mut right = inner.right();
+        let key = rem(2.0);
+        let margin = rem(0.25);
+        let lit = over || selected;
         if queue {
-            let key = rem(2.0);
-            let margin = rem(0.25);
-            let lit = over || selected;
             let mut x = right - 3.0 * (key + 2.0 * margin);
             for (glyph, sensitive, edit) in [(glyphs::UP, i > 0, -1i64), (glyphs::DOWN, i + 1 < n, 1), (glyphs::REMOVE, true, 0)] {
                 let b = R::new(x + margin, (mid - key / 2.0).round(), key, key);
@@ -622,7 +638,19 @@ fn draw_row(app: &App, t: &mut Tracks, i: usize, r: R, ui: &mut Ui, current: Opt
                     }
                 }
             }
-            right -= 3.0 * (key + 2.0 * margin) + rem(0.75);
+            right -= 3.0 * (key + 2.0 * margin);
+        }
+        // a track the library has (a playlist's missing file is not)
+        if let (Some(start), true) = (row.start.filter(|_| row.plain.is_none()), app.vectors.is_some()) {
+            let b = R::new(right - margin - key, (mid - key / 2.0).round(), key, key);
+            if edit_key(ui, b, glyphs::RADIO, true, lit) {
+                clicked_inside = true;
+                app.act(Action::Radio(Seed::Track(t.uris[start].clone())));
+            }
+            right -= key + 2.0 * margin;
+        }
+        if right < inner.right() {
+            right -= rem(0.75);
         }
         if let Some(d) = row.duration {
             let w = ui.text_right(Style::Subtitle, &library::clock(d), right, (mid - ls / 2.0).round());

@@ -22,7 +22,7 @@ for an album, with the folder's name.
 | | |
 |---|---|
 | ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
-| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, a radio from Calibro 35, the song on marked](docs/queue.webp) |
+| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, an album of Pulp playing, the song on marked, a radio key on every row](docs/queue.webp) |
 | ![The picker on everything](docs/picker.webp) | ![The commands' picker, every action with its keys](docs/commands.webp) |
 
 ## Build
@@ -114,7 +114,7 @@ album's page lights Albums whatever tab it was opened over, and Escape
 still goes back to that tab. An album's, a playlist's, an
 artist's page and the queue have the same head on top, still (the
 cover or the portrait, the words beside it, an artist's scrolling on
-their own), and under it the tracks or the albums in a block that
+their own, the buttons at its foot on the right), and under it the tracks or the albums in a block that
 scrolls, down to the player; opened, the queue shows the song on in its
 middle. The album and artist grids come in a random order, dealt again
 by a click on their tab, by its key, and by Ctrl+R, which also
@@ -193,7 +193,8 @@ box: there is no other font to fall back on.
 An artist's portrait and biography come from the net the first time
 they are shown and are kept in the database (the words) and in
 `~/.cache/mascarpone/artists` (the face): MusicBrainz
-names the artist and links it to Wikidata and Wikipedia, whose summary
+names the artist (by the MusicBrainz id the files' tags carry, as
+Picard writes it, else by name) and links it to Wikidata and Wikipedia, whose summary
 gives the words and the lead picture; TheAudioDB (free key `123`) gives
 a portrait by MusicBrainz id and words when Wikipedia has none; Deezer
 a picture when nobody else has one. MusicBrainz is asked once a second
@@ -230,13 +231,19 @@ between (post-rock, a vocoder, a sampled voice). On the same thread, every artis
 once on the net, one every few seconds (MusicBrainz's pace), for their
 links to other artists: MusicBrainz's relations (a band's members,
 collaborations, tributes), Wikidata's influences (P737), Deezer's
-related artists; that shows in the header too.
+related artists; that shows in the header too. The tags' MusicBrainz
+id is the artist's identity: an artist found by name before whose tags
+say otherwise (a namesake) is asked about again by id, and what the
+net said of the namesake moves to a row of its own; a name whose tags
+carry several ids ("Charlie Haden & Pat Metheny") is a collaboration,
+linked to each of its members instead.
 
 Everything is in `~/.local/share/mascarpone/mascarpone.db`, SQLite,
 by integer ids (`src/db.rs`). The library as mpd gives it, written
 whole at every load and when the playlists are read again, the rows of
 what is gone dropped: `artist` (the albums' artists marked
-`in_library`), `album`, `track` with its tags, `playlist` with its
+`in_library`, with the MusicBrainz id from the tags), `album` and
+`track` with their tags, the MusicBrainz ids among them, `playlist` with its
 shuffle and its origin in two columns, what it came from and the
 origin's address (`queue`; `radio:track`, `radio:album` or
 `radio:artist` with the track's uri, the album's key or the artist's
@@ -255,23 +262,29 @@ the library has none of theirs), found by MusicBrainz id, else Deezer
 id, else name. The window keeps what it needs in memory; the file is
 for the record and for `sqlite3`.
 
-`s` (or the radio button: on an album's and an artist's page, and on
-their cards, right of the play button) starts a radio from what is
+`s` (or the radio button: on an album's and an artist's page, on
+their cards, right of the play button, and at the end of every track
+row the library has) starts a radio from what is
 selected: a track, which plays first; an album, whose tracks together are what the
 path starts from, none of them played; an artist, twenty of whose
 tracks open it at random, and whose tracks are all it plays. Whenever
 fewer than five tracks remain after the song on, twenty more are
-added: four sub-blocks of five, each an arc from the seed, always from
-the seed (a track's vector, the mean of an album's or an artist's
-tracks) and never from what played last, a track a part: the
+added: an arc from the seed, always from the seed (a track's vector,
+the mean of an album's or an artist's tracks) and never from what
+played last, four tracks a part, each part passing into the next over
+its four tracks, a quarter a track: the
 equilibrium (the seed, steadier), the break (tension: the minor and
 diminished triads up, the loudness and brightness less steady), the
 adventure (faster, louder, brighter, more varied, more vocal), the
 resolution (loud and open, the major up), the new equilibrium (slower,
 quieter, darker, sparser, less vocal). Each part is a shift of the seed's vector along
-bliss's features (`ARC` in `src/radio.rs`), and its track is the
+bliss's features (`ARC` in `src/radio.rs`; a track between two parts
+gets the two shifts in proportion), measured in standard
+deviations of each feature over the library, so that a feature the
+library hardly spans is shifted as gently as one it spans whole; its track is the
 nearest to that shift, one of the six nearest, the nearer the likelier,
-never one already in the queue. A track by an artist linked
+never one already in the queue, never one longer than a quarter of an
+hour (a whole side, a live set). A track by an artist linked
 to the seed's artist counts as nearer: its distance is shortened by
 35% for a relation or an influence, by 25% for an artist Deezer finds
 alike. The distance is over bliss's 23 features and the two of the

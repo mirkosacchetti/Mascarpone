@@ -103,11 +103,15 @@ pub fn forget(db: &crate::db::Shared, name: &str) {
 /// The artist's info, from the database or from the net (and then into
 /// the database). A net failure leaves nothing, so it is tried again later.
 pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
-    match db.lock().unwrap().artist_info(name) {
-        Ok(Some(info)) => return info,
-        Ok(None) => {}
-        Err(e) => eprintln!("artist {name}: {e}"),
-    }
+    let mbid = {
+        let db = db.lock().unwrap();
+        match db.artist_info(name) {
+            Ok(Some(info)) => return info,
+            Ok(None) => {}
+            Err(e) => eprintln!("artist {name}: {e}"),
+        }
+        db.artist_mbid(name).unwrap_or_default()
+    };
     // the file from before the database: taken in, and gone
     let path = info_path(name);
     let info = match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Info>(&b).ok()) {
@@ -115,7 +119,7 @@ pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
             let _ = std::fs::remove_file(&path);
             info
         }
-        None => match fetch(net, name).await {
+        None => match fetch(net, name, mbid.as_deref()).await {
             Ok(info) => info,
             Err(e) => {
                 eprintln!("artist {name}: {e}");
@@ -129,17 +133,28 @@ pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
     info
 }
 
-async fn fetch(net: &Net, name: &str) -> Result<Info> {
+/// The artist's MusicBrainz id by name: the first found, when it is a
+/// close match.
+async fn musicbrainz_id(net: &Net, name: &str) -> Result<Option<String>> {
+    let found = net
+        .musicbrainz("https://musicbrainz.org/ws/2/artist/", &[("query", format!("artist:\"{name}\"")), ("fmt", "json".into()), ("limit", "1".into())])
+        .await?;
+    Ok(found["artists"].get(0).filter(|a| a["score"].as_i64().unwrap_or(0) >= 85).and_then(|a| a["id"].as_str()).map(str::to_owned))
+}
+
+/// The artist's info: by MusicBrainz id when the tags gave one, else
+/// by name.
+async fn fetch(net: &Net, name: &str, mbid: Option<&str>) -> Result<Info> {
     let mut info = Info::default();
     let mut image_url: Option<String> = None;
     let mut audiodb_bio: Option<String> = None;
 
     // MusicBrainz: the artist, then its links
-    let found = net
-        .musicbrainz("https://musicbrainz.org/ws/2/artist/", &[("query", format!("artist:\"{name}\"")), ("fmt", "json".into()), ("limit", "1".into())])
-        .await?;
-    let artist = found["artists"].get(0).filter(|a| a["score"].as_i64().unwrap_or(0) >= 85);
-    if let Some(id) = artist.and_then(|a| a["id"].as_str()) {
+    let id = match mbid {
+        Some(id) => Some(id.to_owned()),
+        None => musicbrainz_id(net, name).await?,
+    };
+    if let Some(id) = id {
         // TheAudioDB by MusicBrainz id: a portrait, and words in reserve
         if let Ok(found) = net.json(&format!("https://www.theaudiodb.com/api/v1/json/123/artist-mb.php?i={id}")).await {
             if let Some(a) = found["artists"].get(0) {
@@ -209,7 +224,8 @@ async fn fetch(net: &Net, name: &str) -> Result<Info> {
     Ok(info)
 }
 
-/// What the net says an artist is linked to, and their ids there.
+/// What the net says an artist is linked to, and their ids there; for
+/// a collaboration, its members from the tags, named by MusicBrainz.
 pub struct Links {
     pub mbid: Option<String>,
     pub deezer: Option<i64>,
@@ -219,15 +235,24 @@ pub struct Links {
 /// An artist's links: MusicBrainz's artist relations and the Wikidata
 /// id, Wikidata's influences, Deezer's related artists. An error only
 /// when MusicBrainz could not be asked; the rest missing is just missing.
-pub async fn links(net: &Net, name: &str) -> Result<Links> {
+pub async fn links(net: &Net, name: &str, mbids: &[String]) -> Result<Links> {
     let mut links = Links { mbid: None, deezer: None, links: Vec::new() };
     let link = |other: &str, other_mbid: Option<&str>, other_deezer: Option<i64>, kind: &str, source: &str| crate::db::Link { other: other.to_owned(), other_mbid: other_mbid.map(str::to_owned), other_deezer, kind: kind.to_owned(), source: source.to_owned() };
-    let found = net
-        .musicbrainz("https://musicbrainz.org/ws/2/artist/", &[("query", format!("artist:\"{name}\"")), ("fmt", "json".into()), ("limit", "1".into())])
-        .await?;
-    let artist = found["artists"].get(0).filter(|a| a["score"].as_i64().unwrap_or(0) >= 85);
-    if let Some(id) = artist.and_then(|a| a["id"].as_str()) {
-        links.mbid = Some(id.to_owned());
+    let id = match mbids {
+        [] => musicbrainz_id(net, name).await?,
+        [id] => Some(id.clone()),
+        members => {
+            for id in members {
+                let member = net.musicbrainz(&format!("https://musicbrainz.org/ws/2/artist/{id}"), &[("fmt", "json".into())]).await?;
+                if let Some(other) = member["name"].as_str() {
+                    links.links.push(link(other, Some(id), None, "member", "tags"));
+                }
+            }
+            None
+        }
+    };
+    if let Some(id) = id {
+        links.mbid = Some(id.clone());
         let full = net.musicbrainz(&format!("https://musicbrainz.org/ws/2/artist/{id}"), &[("inc", "artist-rels+url-rels".into()), ("fmt", "json".into())]).await?;
         let mut wikidata: Option<String> = None;
         for rel in full["relations"].as_array().into_iter().flatten() {

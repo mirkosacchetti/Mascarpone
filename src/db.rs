@@ -70,7 +70,7 @@ pub const FEATURES: [&str; N] = [
 pub const VERSION: i64 = bliss_audio::FeaturesVersion::LATEST as i64;
 
 /// The schema's version, `pragma user_version`.
-const SCHEMA: i64 = 6;
+const SCHEMA: i64 = 7;
 
 pub fn path() -> PathBuf {
     crate::dirs::data().join("mascarpone").join("mascarpone.db")
@@ -174,6 +174,9 @@ impl Db {
             if version < 6 {
                 self.conn.execute_batch("alter table track add column voice real; alter table track add column voiced real; alter table track add column vocal integer;")?;
             }
+            if version < 7 {
+                self.conn.execute_batch("alter table album add column mbid text; alter table track add column mbid text;")?;
+            }
             self.conn.pragma_update(None, "user_version", SCHEMA)?;
             return Ok(());
         }
@@ -205,7 +208,8 @@ impl Db {
                 artist_id integer not null references artist (id),
                 year text,
                 folder text,
-                loose integer not null default 0
+                loose integer not null default 0,
+                mbid text
             );
             create table track (
                 id integer primary key,
@@ -224,7 +228,8 @@ impl Db {
                 {features},
                 voice real,
                 voiced real,
-                vocal integer
+                vocal integer,
+                mbid text
             );
             create index track_album on track (album_id);
             create table playlist (
@@ -287,9 +292,9 @@ impl Db {
     // the library
 
     /// The library written whole: the artists (the albums' marked as the
-    /// library's, the rest not), the albums, the tracks with their tags
-    /// (the analysis kept), the playlists; the rows of what is gone
-    /// dropped.
+    /// library's, the rest not, each given the MusicBrainz id its tags
+    /// carry), the albums, the tracks with their tags (the analysis
+    /// kept), the playlists; the rows of what is gone dropped.
     pub fn write_library(&mut self, library: &Library) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("update artist set in_library = 0", [])?;
@@ -297,26 +302,39 @@ impl Db {
             let mut artist = tx.prepare_cached("insert into artist (name, in_library) values (?1, 1) on conflict (name) do update set in_library = 1")?;
             for a in &library.artists {
                 artist.execute(params![a.name])?;
+                let id: i64 = tx.query_row("select id from artist where name = ?1", params![a.name], |r| r.get(0))?;
+                match a.mbids.as_slice() {
+                    [mbid] => claim_mbid(&tx, id, mbid)?,
+                    // a collaboration: its members are asked of the net
+                    // once, and are its links from the tags
+                    [_, _, ..] => {
+                        let linked: bool = tx.query_row("select exists (select 1 from relation where artist_id = ?1 and source = 'tags')", params![id], |r| r.get(0))?;
+                        if !linked {
+                            tx.execute("update artist set links_fetched = null, links_error = null where id = ?1", params![id])?;
+                        }
+                    }
+                    [] => {}
+                }
             }
             let mut track_artist = tx.prepare_cached("insert or ignore into artist (name) values (?1)")?;
             let mut album = tx.prepare_cached(
-                "insert into album (key, title, artist_id, year, folder, loose) values (?1, ?2, (select id from artist where name = ?3), ?4, ?5, ?6)
-                 on conflict (key) do update set title = excluded.title, artist_id = excluded.artist_id, year = excluded.year, folder = excluded.folder, loose = excluded.loose",
+                "insert into album (key, title, artist_id, year, folder, loose, mbid) values (?1, ?2, (select id from artist where name = ?3), ?4, ?5, ?6, ?7)
+                 on conflict (key) do update set title = excluded.title, artist_id = excluded.artist_id, year = excluded.year, folder = excluded.folder, loose = excluded.loose, mbid = excluded.mbid",
             )?;
             let mut track = tx.prepare_cached(
-                "insert into track (uri, album_id, artist_id, title, disc, number, duration) values (?1, (select id from album where key = ?2), (select id from artist where name = ?3), ?4, ?5, ?6, ?7)
-                 on conflict (uri) do update set album_id = excluded.album_id, artist_id = excluded.artist_id, title = excluded.title, disc = excluded.disc, number = excluded.number, duration = excluded.duration",
+                "insert into track (uri, album_id, artist_id, title, disc, number, duration, mbid) values (?1, (select id from album where key = ?2), (select id from artist where name = ?3), ?4, ?5, ?6, ?7, ?8)
+                 on conflict (uri) do update set album_id = excluded.album_id, artist_id = excluded.artist_id, title = excluded.title, disc = excluded.disc, number = excluded.number, duration = excluded.duration, mbid = excluded.mbid",
             )?;
             tx.execute_batch("create temp table if not exists keep_album (key text primary key); create temp table if not exists keep_track (uri text primary key); delete from keep_album; delete from keep_track;")?;
             let mut keep_album = tx.prepare_cached("insert or ignore into keep_album (key) values (?1)")?;
             let mut keep_track = tx.prepare_cached("insert or ignore into keep_track (uri) values (?1)")?;
             for a in &library.albums {
                 let folder = Path::new(&a.tracks[0].uri).parent().map(|p| p.to_string_lossy().into_owned());
-                album.execute(params![a.key, a.title, a.artist, a.year, folder, a.loose as i64])?;
+                album.execute(params![a.key, a.title, a.artist, a.year, folder, a.loose as i64, a.mbid])?;
                 keep_album.execute(params![a.key])?;
                 for t in &a.tracks {
                     track_artist.execute(params![t.artist])?;
-                    track.execute(params![t.uri, a.key, t.artist, t.title, t.disc as i64, t.number as i64, t.duration.map(|d| d.as_secs_f64())])?;
+                    track.execute(params![t.uri, a.key, t.artist, t.title, t.disc as i64, t.number as i64, t.duration.map(|d| d.as_secs_f64()), t.mbid])?;
                     keep_track.execute(params![t.uri])?;
                 }
             }
@@ -429,6 +447,12 @@ impl Db {
     // the artists from the net
 
     /// What the net said of an artist, once it has been asked.
+    /// The artist's MusicBrainz id, when the tags or the net gave one.
+    pub fn artist_mbid(&self, name: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached("select mbid from artist where name = ?1")?;
+        Ok(stmt.query_row(params![name], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+    }
+
     pub fn artist_info(&self, name: &str) -> Result<Option<Info>> {
         let mut stmt = self.conn.prepare_cached("select bio, wikipedia, portrait from artist where name = ?1 and info_fetched is not null")?;
         Ok(stmt.query_row(params![name], |r| Ok(Info { bio: r.get(0)?, wikipedia: r.get(1)?, portrait: r.get::<_, i64>(2)? != 0 })).optional()?)
@@ -484,15 +508,82 @@ impl Db {
     }
 }
 
+/// The library's artist given the MusicBrainz id its tags carry. A row
+/// made for that id from another's links is merged into theirs. When
+/// the row had another id, the net was asked about a namesake: what it
+/// said moves to a row of its own, and the artist is asked about again.
+fn claim_mbid(conn: &Connection, id: i64, mbid: &str) -> Result<()> {
+    let old: Option<String> = conn.query_row("select mbid from artist where id = ?1", params![id], |r| r.get(0))?;
+    if old.as_deref() == Some(mbid) {
+        return Ok(());
+    }
+    let theirs = conn.query_row("select id, in_library from artist where mbid = ?1 and id != ?2", params![mbid, id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))).optional()?;
+    // two names of the library for one artist ("Basinski, William" and
+    // "William Basinski"): the id stays with the first, the other is
+    // known by name as before
+    if theirs.is_some_and(|(_, in_library)| in_library) {
+        return Ok(());
+    }
+    // the namesake's first, so that the merge's links stay
+    if let Some(old) = old {
+        conn.execute(
+            "insert or ignore into artist (name, mbid, deezer_id, bio, wikipedia, portrait, info_fetched, links_fetched, links_error)
+             select name || ' (' || ?2 || ')', mbid, deezer_id, bio, wikipedia, portrait, info_fetched, links_fetched, links_error from artist where id = ?1",
+            params![id, old],
+        )?;
+        let namesake: i64 = conn.query_row("select id from artist where name = (select name || ' (' || ?2 || ')' from artist where id = ?1)", params![id, old], |r| r.get(0))?;
+        conn.execute("update or ignore relation set artist_id = ?2 where artist_id = ?1", params![id, namesake])?;
+        conn.execute("update or ignore relation set other_id = ?2 where other_id = ?1", params![id, namesake])?;
+        conn.execute("delete from relation where artist_id = ?1 or other_id = ?1", params![id])?;
+        conn.execute("update artist set deezer_id = null, bio = null, wikipedia = null, portrait = null, info_fetched = null, links_fetched = null, links_error = null where id = ?1", params![id])?;
+    }
+    if let Some((theirs, _)) = theirs {
+        merge_artist(conn, theirs, id)?;
+    }
+    // asked about again, by id now
+    conn.execute("update artist set mbid = ?2, links_fetched = null, links_error = null where id = ?1", params![id, mbid])?;
+    Ok(())
+}
+
+/// One artist's row folded into another's: the links, the albums and
+/// tracks moved over, the ids and words kept where the other lacks them.
+fn merge_artist(conn: &Connection, from: i64, into: i64) -> Result<()> {
+    conn.execute("update or ignore relation set artist_id = ?2 where artist_id = ?1", params![from, into])?;
+    conn.execute("update or ignore relation set other_id = ?2 where other_id = ?1", params![from, into])?;
+    conn.execute("delete from relation where artist_id = ?1 or other_id = ?1 or artist_id = other_id", params![from])?;
+    conn.execute("update album set artist_id = ?2 where artist_id = ?1", params![from, into])?;
+    conn.execute("update track set artist_id = ?2 where artist_id = ?1", params![from, into])?;
+    conn.execute(
+        "update artist set
+            deezer_id = coalesce(deezer_id, (select deezer_id from artist where id = ?1)),
+            bio = coalesce(bio, (select bio from artist where id = ?1)),
+            wikipedia = coalesce(wikipedia, (select wikipedia from artist where id = ?1)),
+            portrait = coalesce(portrait, (select portrait from artist where id = ?1)),
+            info_fetched = coalesce(info_fetched, (select info_fetched from artist where id = ?1))
+         where id = ?2",
+        params![from, into],
+    )?;
+    conn.execute("update artist set mbid = null where id = ?1", params![from])?;
+    conn.execute("delete from artist where id = ?1", params![from])?;
+    Ok(())
+}
+
 /// The artist's row, found by MusicBrainz id, else Deezer id, else name
-/// (case aside), made when there is none; the ids filled in.
+/// (case aside, unless that row is known to be another's by its id),
+/// made when there is none (as "name (id)" after a namesake); the ids
+/// filled in.
 fn artist_id(conn: &Connection, name: &str, mbid: Option<&str>, deezer: Option<i64>) -> Result<i64> {
     let by_mbid = |m: &str| conn.query_row("select id from artist where mbid = ?1", params![m], |r| r.get::<_, i64>(0)).optional();
     let by_deezer = |d: i64| conn.query_row("select id from artist where deezer_id = ?1", params![d], |r| r.get::<_, i64>(0)).optional();
-    let by_name = || conn.query_row("select id from artist where name = ?1", params![name], |r| r.get::<_, i64>(0)).optional();
+    let by_name = || conn.query_row("select id, mbid from artist where name = ?1", params![name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))).optional();
     let id = match (mbid.map(by_mbid).transpose()?.flatten(), deezer.map(by_deezer).transpose()?.flatten(), by_name()?) {
-        (Some(id), _, _) | (None, Some(id), _) | (None, None, Some(id)) => id,
-        (None, None, None) => {
+        (Some(id), _, _) | (None, Some(id), _) => id,
+        (None, None, Some((id, theirs))) if mbid.is_none() || theirs.is_none() => id,
+        (None, None, namesake) => {
+            let name = match (namesake, mbid) {
+                (Some(_), Some(mbid)) => format!("{name} ({mbid})"),
+                _ => name.to_owned(),
+            };
             conn.execute("insert into artist (name, mbid, deezer_id) values (?1, ?2, ?3)", params![name, mbid, deezer])?;
             conn.last_insert_rowid()
         }
@@ -520,4 +611,70 @@ fn write_playlists(tx: &Connection, playlists: &[Playlist]) -> Result<()> {
     }
     tx.execute("delete from playlist where path not in (select path from keep_playlist)", [])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(other: &str, mbid: Option<&str>, kind: &str, source: &str) -> Link {
+        Link { other: other.into(), other_mbid: mbid.map(str::to_owned), other_deezer: None, kind: kind.into(), source: source.into() }
+    }
+
+    #[test]
+    fn the_tags_id_wins_over_the_net_s() {
+        let mut db = Db::in_memory().unwrap();
+        let mut lib = Library::of(&[("Beck", "Odelay", 2), ("Pavement", "Wowee Zowee", 2)]);
+        db.write_library(&lib).unwrap();
+        // the net found a namesake for Beck, and Pavement's links name
+        // the real one, a row out of the library
+        db.write_links("Beck", Some("namesake"), None, None, &[link("Jeff Beck", Some("jeff"), "member of band", "musicbrainz")]).unwrap();
+        db.write_links("Pavement", Some("pavement"), None, None, &[link("Beck", Some("beck"), "collaboration", "musicbrainz")]).unwrap();
+        assert_eq!(db.linked().unwrap().len(), 2);
+        assert_eq!(db.relations().unwrap().len(), 0, "the real Beck is not in the library yet");
+        // the tags say who Beck is
+        let beck = lib.artists.iter().position(|a| a.name == "Beck").unwrap();
+        lib.artists[beck].mbids = vec!["beck".into()];
+        db.write_library(&lib).unwrap();
+        assert_eq!(db.artist_mbid("Beck").unwrap().as_deref(), Some("beck"));
+        assert_eq!(db.artist_mbid("Beck (namesake)").unwrap().as_deref(), Some("namesake"));
+        let linked = db.linked().unwrap();
+        assert!(!linked.contains_key("Beck"), "asked again, by id");
+        assert!(linked.contains_key("Pavement"));
+        let rows: Vec<(i64, i64)> = {
+            let mut stmt = db.conn.prepare("select artist_id, other_id from relation").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(rows.len(), 2, "the namesake's link and Pavement's, the merged row gone");
+        let relations = db.relations().unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!((relations[0].artist.as_str(), relations[0].other.as_str()), ("Pavement", "Beck"));
+        let count: i64 = db.conn.query_row("select count(*) from artist where mbid = 'beck'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        // once answered by id, settled
+        db.write_links("Beck", Some("beck"), None, None, &[]).unwrap();
+        db.write_library(&lib).unwrap();
+        assert!(db.linked().unwrap().contains_key("Beck"));
+    }
+
+    #[test]
+    fn a_collaboration_is_asked_for_its_members_once() {
+        let mut db = Db::in_memory().unwrap();
+        let mut lib = Library::of(&[("Charlie Haden & Pat Metheny", "Beyond the Missouri Sky", 2), ("Pat Metheny", "Bright Size Life", 2)]);
+        db.write_library(&lib).unwrap();
+        db.write_links("Charlie Haden & Pat Metheny", None, None, None, &[]).unwrap();
+        assert!(db.linked().unwrap().contains_key("Charlie Haden & Pat Metheny"));
+        lib.artists.iter_mut().find(|a| a.name == "Pat Metheny").unwrap().mbids = vec!["pat".into()];
+        lib.artists.iter_mut().find(|a| a.name.starts_with("Charlie")).unwrap().mbids = vec!["charlie".into(), "pat".into()];
+        db.write_library(&lib).unwrap();
+        assert!(!db.linked().unwrap().contains_key("Charlie Haden & Pat Metheny"), "asked about its members");
+        db.write_links("Charlie Haden & Pat Metheny", None, None, None, &[link("Charlie Haden", Some("charlie"), "member", "tags"), link("Pat Metheny", Some("pat"), "member", "tags")]).unwrap();
+        db.write_library(&lib).unwrap();
+        assert!(db.linked().unwrap().contains_key("Charlie Haden & Pat Metheny"), "settled");
+        let relations = db.relations().unwrap();
+        assert_eq!(relations.len(), 1, "Pat Metheny is in the library, Charlie Haden is not");
+        assert_eq!(relations[0].other, "Pat Metheny");
+        let count: i64 = db.conn.query_row("select count(*) from artist", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 3);
+    }
 }

@@ -20,6 +20,8 @@ pub struct Track {
     pub disc: u64,
     pub number: u64,
     pub duration: Option<Duration>,
+    /// MusicBrainz's id of the recording, from the file's tags.
+    pub mbid: Option<String>,
 }
 
 #[derive(Debug)]
@@ -34,6 +36,11 @@ pub struct Album {
     pub tracks: Vec<Track>,
     /// Not an album but a folder: the tracks there without an album tag.
     pub loose: bool,
+    /// MusicBrainz's id of the release, from the files' tags.
+    pub mbid: Option<String>,
+    /// MusicBrainz's ids of the album artist, from the tags: one, or
+    /// one a member when the name is a collaboration's.
+    pub artist_mbids: Vec<String>,
 }
 
 impl Album {
@@ -61,6 +68,9 @@ pub struct Artist {
     pub name: String,
     /// Indexes into `Library::albums`.
     pub albums: Vec<usize>,
+    /// MusicBrainz's ids from the albums' tags: one, the artist's; more,
+    /// the members' of a collaboration; none, untagged.
+    pub mbids: Vec<String>,
 }
 
 /// A playlist's entry: the track as the library knows it, or, for a file
@@ -133,6 +143,43 @@ fn album_artist(song: &Song) -> &str {
         .unwrap_or(UNKNOWN_ARTIST)
 }
 
+/// A tag's MusicBrainz ids: a value each, or several in one separated
+/// by a slash or a semicolon as some taggers write them, each once.
+fn ids(song: &Song, tag: &Tag) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in song.tags.get(tag).into_iter().flatten() {
+        for id in value.split(['/', ';']).map(str::trim).filter(|id| !id.is_empty()) {
+            if !out.iter().any(|o| o == id) {
+                out.push(id.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// An artist's ids from their albums': when an album names several,
+/// the name is a collaboration's and the ids are its members', all of
+/// them; else the one most albums agree on (a tagger's slip aside).
+fn artist_mbids<'a>(albums: impl Iterator<Item = &'a [String]> + Clone) -> Vec<String> {
+    if albums.clone().any(|ids| ids.len() > 1) {
+        let mut all: Vec<String> = Vec::new();
+        for id in albums.flatten() {
+            if !all.contains(id) {
+                all.push(id.clone());
+            }
+        }
+        return all;
+    }
+    let mut count: Vec<(&String, usize)> = Vec::new();
+    for id in albums.flatten() {
+        match count.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, n)) => *n += 1,
+            None => count.push((id, 1)),
+        }
+    }
+    count.into_iter().max_by_key(|(_, n)| *n).map(|(id, _)| vec![id.clone()]).unwrap_or_default()
+}
+
 /// The key of the album a song belongs to; for a song without an album,
 /// the folder it is in, which stands in for one.
 pub fn album_key(song: &Song) -> Option<String> {
@@ -171,10 +218,21 @@ impl Library {
                     year: None,
                     tracks: Vec::new(),
                     loose,
+                    mbid: None,
+                    artist_mbids: Vec::new(),
                 });
                 albums.len() - 1
             });
             let album = &mut albums[index];
+            if album.mbid.is_none() {
+                album.mbid = ids(&song, &Tag::MusicBrainzReleaseId).pop();
+            }
+            if album.artist_mbids.is_empty() {
+                // the album artist's; the artist's when the album artist
+                // is only the artist standing in
+                let tag = if song.album_artists().is_empty() { Tag::MusicBrainzArtistId } else { Tag::MusicBrainzReleaseArtistId };
+                album.artist_mbids = ids(&song, &tag);
+            }
             if album.year.is_none() {
                 let date = song
                     .tags
@@ -194,6 +252,7 @@ impl Library {
                 disc,
                 number,
                 duration: song.duration,
+                mbid: ids(&song, &Tag::MusicBrainzRecordingId).pop(),
                 uri: song.url,
             });
         }
@@ -216,7 +275,8 @@ impl Library {
             .into_iter()
             .map(|(name, mut list)| {
                 list.sort_by_cached_key(|&i| (albums[i].year.clone().unwrap_or_default(), sort_name(&albums[i].title)));
-                Artist { name: name.to_owned(), albums: list }
+                let mbids = artist_mbids(list.iter().map(|&i| albums[i].artist_mbids.as_slice()));
+                Artist { name: name.to_owned(), albums: list, mbids }
             })
             .collect();
         artists.sort_by_cached_key(|a| sort_name(&a.name));
@@ -240,8 +300,10 @@ impl Library {
                 title: title.to_string(),
                 artist: artist.to_string(),
                 year: None,
-                tracks: (1..=*n).map(|i| Track { uri: format!("{artist}/{title}/{i}.ogg"), title: format!("{title} {i}"), artist: artist.to_string(), disc: 1, number: i as u64, duration: None }).collect(),
+                tracks: (1..=*n).map(|i| Track { uri: format!("{artist}/{title}/{i}.ogg"), title: format!("{title} {i}"), artist: artist.to_string(), disc: 1, number: i as u64, duration: None, mbid: None }).collect(),
                 loose: false,
+                mbid: None,
+                artist_mbids: Vec::new(),
             })
             .collect();
         Library::assemble(albums)

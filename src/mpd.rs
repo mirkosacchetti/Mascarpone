@@ -65,7 +65,8 @@ pub enum Command {
     Seek(Duration),
     /// These artists' links from the net, one at a time, each sent to
     /// the radio thread as it comes; a new list replaces the one going.
-    Links(Vec<String>),
+    /// Artists by name, each with the MusicBrainz ids their tags carry.
+    Links(Vec<(String, Vec<String>)>),
 }
 
 /// What mpd tells the window.
@@ -270,8 +271,8 @@ async fn session(
                     }
                     let (net, radio) = (net.clone(), radio.clone());
                     linking = Some(tokio::spawn(async move {
-                        for name in names {
-                            let job = match crate::net::links(&net, &name).await {
+                        for (name, mbids) in names {
+                            let job = match crate::net::links(&net, &name, &mbids).await {
                                 Ok(l) => crate::radio::Job::Links { name, mbid: l.mbid, deezer: l.deezer, links: l.links, error: None },
                                 Err(e) => {
                                     eprintln!("links of {name}: {e}");
