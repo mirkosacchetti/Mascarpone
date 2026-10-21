@@ -22,7 +22,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use crate::app::{Action, App, Page};
 use crate::glyphs;
 use crate::library::Library;
-use crate::pages::{count, ArtistPage, Tracks};
+use crate::pages::count;
 use crate::rl::{self, Input};
 use crate::size::rem;
 use crate::ui::{self, Entry, Style, Ui, R};
@@ -233,9 +233,9 @@ impl Picker {
         let action = match self.lines[i].target {
             Target::Command(shortcut) => Action::Run(shortcut),
             Target::Row(row) => Action::SelectRow(row),
-            Target::Album(a) => Action::Push(Page::Album(Tracks::album(&self.library, a, 0))),
-            Target::Track(a, t) => Action::Push(Page::Album(Tracks::album(&self.library, a, t))),
-            Target::Artist(a) => Action::Push(Page::Artist(ArtistPage::new(&self.library, a))),
+            Target::Album(a) => Action::OpenAlbum { key: self.library.albums[a].key.clone(), track: 0 },
+            Target::Track(a, t) => Action::OpenAlbum { key: self.library.albums[a].key.clone(), track: t },
+            Target::Artist(a) => Action::OpenArtist(self.library.artists[a].name.clone()),
             Target::Playlist(p) => match self.library.playlists().get(p) {
                 Some(p) => Action::OpenPlaylist(p.path.clone()),
                 None => return false,
@@ -407,8 +407,11 @@ pub enum Modal {
 }
 
 impl Modal {
-    pub fn name() -> Modal {
-        Modal::Name(Entry::default())
+    /// The name to save the queue as, with a name proposed (the radio's),
+    /// the caret at its end.
+    pub fn name(proposed: Option<String>) -> Modal {
+        let text = proposed.unwrap_or_default();
+        Modal::Name(Entry { caret: text.len(), text })
     }
 
     pub fn delete(path: PathBuf, name: String) -> Modal {

@@ -57,10 +57,15 @@ pub enum Command {
     Queue { uris: Vec<String> },
     /// The cover of the album `key`, from the file `uri`.
     Cover { key: String, uri: String },
-    /// The artist's portrait and biography, from the net or the cache.
+    /// The artist's portrait and biography, from the database or the net.
     Artist(String),
+    /// What is kept on the artist forgotten, and asked of the net again.
+    ForgetArtist(String),
     /// Jump to this point of the song on.
     Seek(Duration),
+    /// These artists' links from the net, one at a time, each sent to
+    /// the radio thread as it comes; a new list replaces the one going.
+    Links(Vec<String>),
 }
 
 /// What mpd tells the window.
@@ -80,6 +85,15 @@ pub enum Event {
     Cover { key: String, path: Option<PathBuf>, failed: bool },
     /// What was found about an artist.
     Artist { name: String, info: crate::net::Info },
+    /// The tracks' analyses, as the radio thread has them: at the start,
+    /// and again as the analysis goes.
+    Vectors(Arc<crate::radio::Vectors>),
+    /// The analysis going: how many files of how many; done when equal.
+    Analyzing { done: usize, total: usize },
+    /// The artists' links from the net, as the radio thread has them.
+    Relations(Arc<crate::radio::Relations>),
+    /// The links being fetched: how many artists of how many.
+    Linking { done: usize, total: usize },
 }
 
 /// The player as it is now: status and the song it is on.
@@ -105,10 +119,13 @@ fn address() -> String {
     format!("{}:{}", config.host, config.port)
 }
 
-/// Starts the mpd thread; returns the end of the pipes the window holds.
-pub fn start() -> (mpsc::UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>) {
+/// Starts the mpd thread; returns the end of the pipes the window holds,
+/// and the events' end for other threads to send on (the radio's).
+pub fn start(radio: std::sync::mpsc::Sender<crate::radio::Job>, db: crate::db::Shared) -> (mpsc::UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>, Out) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+    let out = Out(ev_tx);
+    let events = out.clone();
     std::thread::Builder::new()
         .name("mpd".into())
         .spawn(move || {
@@ -116,10 +133,10 @@ pub fn start() -> (mpsc::UnboundedSender<Command>, std::sync::mpsc::Receiver<Eve
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(run(cmd_rx, Out(ev_tx)));
+            rt.block_on(run(cmd_rx, events, radio, db));
         })
         .expect("mpd thread");
-    (cmd_tx, ev_rx)
+    (cmd_tx, ev_rx, out)
 }
 
 /// The events' end on this side: each one sent wakes the window.
@@ -128,18 +145,18 @@ pub struct Out(std::sync::mpsc::Sender<Event>);
 
 impl Out {
     /// False when the window is gone.
-    fn send(&self, event: Event) -> bool {
+    pub fn send(&self, event: Event) -> bool {
         let sent = self.0.send(event).is_ok();
         crate::rl::wake();
         sent
     }
 }
 
-async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: Out) {
+async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: Out, radio: std::sync::mpsc::Sender<crate::radio::Job>, db: crate::db::Shared) {
     let address = address();
     let net = crate::net::Net::new();
     loop {
-        match session(&address, &mut commands, &events, &net).await {
+        match session(&address, &mut commands, &events, &net, &radio, &db).await {
             Ok(()) => return, // the window is gone
             Err(e) => {
                 events.send(Event::Disconnected { reason: e.to_string() });
@@ -155,6 +172,8 @@ async fn session(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &Out,
     net: &Arc<crate::net::Net>,
+    radio: &std::sync::mpsc::Sender<crate::radio::Job>,
+    db: &crate::db::Shared,
 ) -> Result<()> {
     let password = crate::config::get().password.as_deref();
     let (client, mut changes) = if address.starts_with('/') {
@@ -180,6 +199,17 @@ async fn session(
     // sync brings hundreds of changes. One asked for (Ctrl+R) at once.
     let mut reload_at: Option<tokio::time::Instant> = None;
     let mut asked = false;
+    // the artists' links being fetched, one list at a time
+    let mut linking: Option<tokio::task::JoinHandle<()>> = None;
+    // an artist's words and face, from the database or the net
+    let ask_artist = |name: String| {
+        let (net, events, lines, db) = (net.clone(), events.clone(), lines.clone(), db.clone());
+        tokio::spawn(async move {
+            let _line = lines.acquire().await;
+            let info = crate::net::lookup(&net, &db, &name).await;
+            events.send(Event::Artist { name, info });
+        });
+    };
 
     loop {
         tokio::select! {
@@ -221,6 +251,11 @@ async fn session(
             },
             command = commands.recv() => match command {
                 None => return Ok(()),
+                Some(Command::ForgetArtist(name)) => {
+                    crate::net::forget(db, &name);
+                    ask_artist(name);
+                }
+                Some(Command::Artist(name)) => ask_artist(name),
                 Some(Command::Cover { key, uri }) => {
                     let (client, events, slots, net, library) = (client.clone(), events.clone(), slots.clone(), net.clone(), library.clone());
                     tokio::spawn(async move {
@@ -229,13 +264,25 @@ async fn session(
                         events.send(Event::Cover { key, failed: found.is_err(), path: found.ok().flatten() });
                     });
                 }
-                Some(Command::Artist(name)) => {
-                    let (net, events, lines) = (net.clone(), events.clone(), lines.clone());
-                    tokio::spawn(async move {
-                        let _line = lines.acquire().await;
-                        let info = crate::net::lookup(&net, &name).await;
-                        events.send(Event::Artist { name, info });
-                    });
+                Some(Command::Links(names)) => {
+                    if let Some(task) = linking.take() {
+                        task.abort();
+                    }
+                    let (net, radio) = (net.clone(), radio.clone());
+                    linking = Some(tokio::spawn(async move {
+                        for name in names {
+                            let job = match crate::net::links(&net, &name).await {
+                                Ok(l) => crate::radio::Job::Links { name, mbid: l.mbid, deezer: l.deezer, links: l.links, error: None },
+                                Err(e) => {
+                                    eprintln!("links of {name}: {e}");
+                                    crate::radio::Job::Links { name, mbid: None, deezer: None, links: Vec::new(), error: Some(e.to_string()) }
+                                }
+                            };
+                            if radio.send(job).is_err() {
+                                return;
+                            }
+                        }
+                    }));
                 }
                 Some(Command::Refresh) => {
                     // the albums the net had no cover for are asked again
@@ -430,7 +477,7 @@ async fn perform(client: &Client, command: Command) -> Result<()> {
         Command::Clear => client.command(cmd::ClearQueue).await?,
         Command::Random(on) => client.command(cmd::SetRandom(on)).await?,
         Command::Seek(to) => client.command(cmd::Seek(cmd::SeekMode::Absolute(to))).await?,
-        Command::ReloadPlaylists | Command::Refresh | Command::Cover { .. } | Command::Artist(_) => unreachable!("handled in session"),
+        Command::ReloadPlaylists | Command::Refresh | Command::Cover { .. } | Command::Artist(_) | Command::ForgetArtist(_) | Command::Links(_) => unreachable!("handled in session"),
     }
     Ok(())
 }

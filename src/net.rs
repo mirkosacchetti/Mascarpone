@@ -4,12 +4,18 @@
 //! summary gives the biography and the lead picture; TheAudioDB (its
 //! free key is `123`) gives a portrait by MusicBrainz id and a biography
 //! when Wikipedia has none; Deezer a picture when nobody else has one.
-//! Everything found is kept in `~/.cache/mascarpone/artists`
-//! (a JSON with the words, a JPEG with the face) and never asked twice;
-//! what is not found is remembered as such too. An album's cover, when
+//! Everything found is kept in the database (the words) and in
+//! `~/.cache/mascarpone/artists` (a JPEG with the face) and never asked
+//! twice; what is not found is remembered as such too (a JSON there from
+//! before the database is taken in the first time its artist is asked). An album's cover, when
 //! mpd has none, from Deezer or the Cover Art Archive, written as
 //! `cover.jpg` in the album's folder like the others. MusicBrainz wants
 //! a request a second at most and a User-Agent that says who asks.
+//! For the radio, an artist's links to others: MusicBrainz's relations
+//! (the band's members, collaborations, tributes), Wikidata's
+//! influences (P737, resolved to names and MusicBrainz ids in one more
+//! call), Deezer's related artists; all kept in the database by the
+//! radio thread.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,15 +66,24 @@ impl Net {
         Arc::new(Net { client, musicbrainz: Mutex::new(Instant::now() - Duration::from_secs(2)) })
     }
 
+    /// A call to MusicBrainz, a second after the last; a 503 (busy, or
+    /// too many calls) is tried again a few times, after a wait.
     async fn musicbrainz(&self, url: &str, query: &[(&str, String)]) -> Result<serde_json::Value> {
         let mut last = self.musicbrainz.lock().await;
-        let wait = Duration::from_millis(1100).saturating_sub(last.elapsed());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
+        for attempt in 0.. {
+            let wait = Duration::from_millis(1100).saturating_sub(last.elapsed());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+            let response = self.client.get(url).query(query).send().await?;
+            *last = Instant::now();
+            if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE && attempt < 3 {
+                tokio::time::sleep(Duration::from_secs(5 << attempt)).await;
+                continue;
+            }
+            return Ok(response.error_for_status()?.json().await?);
         }
-        let value = self.client.get(url).query(query).send().await?.error_for_status()?.json().await?;
-        *last = Instant::now();
-        Ok(value)
+        unreachable!()
     }
 
     async fn json(&self, url: &str) -> Result<serde_json::Value> {
@@ -76,32 +91,42 @@ impl Net {
     }
 }
 
-/// Forgets what the cache has on an artist, for a new try.
-pub fn forget(name: &str) {
+/// Forgets what is kept on an artist, for a new try.
+pub fn forget(db: &crate::db::Shared, name: &str) {
+    if let Err(e) = db.lock().unwrap().forget_info(name) {
+        eprintln!("artist {name}: {e}");
+    }
     let _ = std::fs::remove_file(info_path(name));
     let _ = std::fs::remove_file(portrait_path(name));
 }
 
-/// The artist's info, from the cache or from the net (and then into the
-/// cache). A net failure leaves no cache, so it is tried again later.
-pub async fn lookup(net: &Net, name: &str) -> Info {
-    let path = info_path(name);
-    if let Some(info) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Info>(&b).ok()) {
-        return info;
+/// The artist's info, from the database or from the net (and then into
+/// the database). A net failure leaves nothing, so it is tried again later.
+pub async fn lookup(net: &Net, db: &crate::db::Shared, name: &str) -> Info {
+    match db.lock().unwrap().artist_info(name) {
+        Ok(Some(info)) => return info,
+        Ok(None) => {}
+        Err(e) => eprintln!("artist {name}: {e}"),
     }
-    match fetch(net, name).await {
-        Ok(info) => {
-            let _ = std::fs::create_dir_all(path.parent().unwrap());
-            if let Ok(json) = serde_json::to_vec(&info) {
-                let _ = std::fs::write(&path, json);
-            }
+    // the file from before the database: taken in, and gone
+    let path = info_path(name);
+    let info = match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Info>(&b).ok()) {
+        Some(info) => {
+            let _ = std::fs::remove_file(&path);
             info
         }
-        Err(e) => {
-            eprintln!("artist {name}: {e}");
-            Info::default()
-        }
+        None => match fetch(net, name).await {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("artist {name}: {e}");
+                return Info::default();
+            }
+        },
+    };
+    if let Err(e) = db.lock().unwrap().write_info(name, &info) {
+        eprintln!("artist {name}: {e}");
     }
+    info
 }
 
 async fn fetch(net: &Net, name: &str) -> Result<Info> {
@@ -182,6 +207,78 @@ async fn fetch(net: &Net, name: &str) -> Result<Info> {
         }
     }
     Ok(info)
+}
+
+/// What the net says an artist is linked to, and their ids there.
+pub struct Links {
+    pub mbid: Option<String>,
+    pub deezer: Option<i64>,
+    pub links: Vec<crate::db::Link>,
+}
+
+/// An artist's links: MusicBrainz's artist relations and the Wikidata
+/// id, Wikidata's influences, Deezer's related artists. An error only
+/// when MusicBrainz could not be asked; the rest missing is just missing.
+pub async fn links(net: &Net, name: &str) -> Result<Links> {
+    let mut links = Links { mbid: None, deezer: None, links: Vec::new() };
+    let link = |other: &str, other_mbid: Option<&str>, other_deezer: Option<i64>, kind: &str, source: &str| crate::db::Link { other: other.to_owned(), other_mbid: other_mbid.map(str::to_owned), other_deezer, kind: kind.to_owned(), source: source.to_owned() };
+    let found = net
+        .musicbrainz("https://musicbrainz.org/ws/2/artist/", &[("query", format!("artist:\"{name}\"")), ("fmt", "json".into()), ("limit", "1".into())])
+        .await?;
+    let artist = found["artists"].get(0).filter(|a| a["score"].as_i64().unwrap_or(0) >= 85);
+    if let Some(id) = artist.and_then(|a| a["id"].as_str()) {
+        links.mbid = Some(id.to_owned());
+        let full = net.musicbrainz(&format!("https://musicbrainz.org/ws/2/artist/{id}"), &[("inc", "artist-rels+url-rels".into()), ("fmt", "json".into())]).await?;
+        let mut wikidata: Option<String> = None;
+        for rel in full["relations"].as_array().into_iter().flatten() {
+            let kind = rel["type"].as_str().unwrap_or_default();
+            if let Some(other) = rel["artist"]["name"].as_str() {
+                if !other.eq_ignore_ascii_case(name) {
+                    links.links.push(link(other, rel["artist"]["id"].as_str(), None, kind, "musicbrainz"));
+                }
+            } else if kind == "wikidata" {
+                wikidata = rel["url"]["resource"].as_str().and_then(|u| u.rsplit('/').next()).map(str::to_owned);
+            }
+        }
+        // Wikidata: whom the artist was influenced by, then those
+        // entities' names and MusicBrainz ids in one call
+        if let Some(q) = wikidata {
+            if let Ok(entity) = net.json(&format!("https://www.wikidata.org/wiki/Special:EntityData/{q}.json")).await {
+                let ids: Vec<String> = entity["entities"][&q]["claims"]["P737"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["mainsnak"]["datavalue"]["value"]["id"].as_str().map(str::to_owned))
+                    .take(50)
+                    .collect();
+                if !ids.is_empty() {
+                    let url = format!("https://www.wikidata.org/w/api.php?action=wbgetentities&ids={}&props=labels|claims&languages=en&format=json", ids.join("|"));
+                    if let Ok(found) = net.json(&url).await {
+                        for id in &ids {
+                            let e = &found["entities"][id];
+                            let Some(label) = e["labels"]["en"]["value"].as_str() else { continue };
+                            let mbid = e["claims"]["P434"][0]["mainsnak"]["datavalue"]["value"].as_str();
+                            links.links.push(link(label, mbid, None, "influenced by", "wikidata"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Deezer: the artist, then the related ones
+    let found = net.client.get("https://api.deezer.com/search/artist").query(&[("q", name), ("limit", "1")]).send().await?.error_for_status()?.json::<serde_json::Value>().await?;
+    let deezer = found["data"].get(0).filter(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))).and_then(|a| a["id"].as_i64());
+    if let Some(id) = deezer {
+        links.deezer = Some(id);
+        if let Ok(related) = net.json(&format!("https://api.deezer.com/artist/{id}/related?limit=25")).await {
+            for a in related["data"].as_array().into_iter().flatten() {
+                if let Some(other) = a["name"].as_str() {
+                    links.links.push(link(other, None, a["id"].as_i64(), "similar", "deezer"));
+                }
+            }
+        }
+    }
+    Ok(links)
 }
 
 /// Language and title of a Wikipedia article url.

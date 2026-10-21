@@ -3,13 +3,14 @@
 //! mpd, a picture decoded, a clock), and in between the window sleeps.
 //! What it knows and does in `app.rs`; the window's parts in `view.rs`,
 //! `pages.rs`, `player.rs` and `picker.rs`; the talk with mpd in
-//! `mpd.rs`; the library, the queue's origin, the covers and the net in
-//! their files.
+//! `mpd.rs`; the library, the queue's origin, the covers, the net, the
+//! radio and its database in their files.
 
 mod app;
 mod bars;
 mod config;
 mod covers;
+mod db;
 mod dirs;
 mod glyphs;
 mod library;
@@ -19,11 +20,13 @@ mod net;
 mod pages;
 mod picker;
 mod player;
+mod radio;
 mod rl;
 mod size;
 mod text;
 mod ui;
 mod view;
+mod voice;
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -35,6 +38,8 @@ const APP_ID: &str = "cards.random.Mascarpone";
 
 /// Another launch asked the window to come up.
 static PRESENT: AtomicBool = AtomicBool::new(false);
+/// What other launches asked over the socket, a line each (see `App::ask`).
+static ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn main() {
     // launched from a launcher, stderr goes nowhere: a panic is kept in
@@ -48,8 +53,20 @@ fn main() {
         }
         hook(info);
     }));
-    // one instance, one window: launched again, the running one is asked
-    // to come up, and this one ends
+    // with words: they go to the running window (`mascarpone tab queue`,
+    // `mascarpone artist Radiohead`, `mascarpone search`...), for a
+    // script, a screenshot; without: one instance, one window, launched
+    // again the running one is asked to come up, and this one ends
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    if !words.is_empty() {
+        match UnixStream::connect(socket_path()) {
+            Ok(mut stream) => {
+                let _ = writeln!(stream, "{}", words.join(" "));
+            }
+            Err(e) => eprintln!("no Mascarpone running: {e}"),
+        }
+        return;
+    }
     let Some(listener) = single() else { return };
 
     size::init();
@@ -59,17 +76,25 @@ fn main() {
             .name("present".into())
             .spawn(move || {
                 for mut stream in listener.incoming().flatten() {
-                    let mut word = String::new();
-                    let _ = stream.read_to_string(&mut word);
-                    PRESENT.store(true, Ordering::SeqCst);
+                    let mut line = String::new();
+                    let _ = stream.read_to_string(&mut line);
+                    let line = line.trim();
+                    if line == "present" {
+                        PRESENT.store(true, Ordering::SeqCst);
+                    } else {
+                        ASKED.lock().unwrap().push(line.to_owned());
+                    }
                     rl::wake();
                 }
             })
             .expect("present thread");
     }
 
-    let (commands, events) = mpd::start();
-    let mut app = app::App::new(commands, events);
+    let db = db::open();
+    let (radio, jobs) = std::sync::mpsc::channel();
+    let (commands, events, out) = mpd::start(radio.clone(), db.clone());
+    radio::start(jobs, out, commands.clone(), db);
+    let mut app = app::App::new(commands, events, radio);
     let mut ui = ui::Ui::new();
     // frames still to draw before sleeping: one more after any change,
     // for what the change moved under the pointer
@@ -82,6 +107,9 @@ fn main() {
         if PRESENT.swap(false, Ordering::SeqCst) {
             app.present = true;
         }
+        for line in std::mem::take(&mut *ASKED.lock().unwrap()) {
+            app.ask(&line);
+        }
         // the last frame not shown yet, or out of sight: mpd's news and the
         // pictures taken in, nothing drawn until the compositor wants it
         if !rl::may_draw() {
@@ -90,7 +118,7 @@ fn main() {
             continue;
         }
         let now = Instant::now();
-        if more == 0 && !held && !app.present && !ui.stirred() && !app.news() && due.is_none_or(|d| d > now) {
+        if more == 0 && !held && !app.present && !ui.stirred() && !app.news() && ASKED.lock().unwrap().is_empty() && due.is_none_or(|d| d > now) {
             rl::wait(due.map_or(60.0, |d| (d - now).as_secs_f64()));
             continue;
         }

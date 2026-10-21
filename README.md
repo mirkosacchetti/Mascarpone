@@ -2,7 +2,9 @@
 
 An mpd client for the desktop (raylib, Rust): the music library, the
 playlists (m3u files in a folder), the pictures, biographies and album
-details fetched the way Lollypop does, and the usual player commands.
+details fetched the way Lollypop does, the usual player commands, and
+a radio: a queue that goes on by itself, each track like the ones
+before it, by bliss's ear and by what the net knows of the artists.
 mpd keeps the music and plays it; Mascarpone is the window on it.
 
 It lives in the scratchpad of sway next to the other players (the
@@ -17,7 +19,7 @@ for an album, with the folder's name.
 | | |
 |---|---|
 | ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
-| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, the song on marked](docs/queue.webp) |
+| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, a radio from Calibro 35, the song on marked](docs/queue.webp) |
 | ![The picker on everything](docs/picker.webp) | |
 
 ## Build
@@ -28,6 +30,13 @@ for an album, with the folder's name.
 raylib (6.2, without audio and models) is in `vendor/raylib` and is
 built with the program, once, in `target/raylib` (`build.rs`, raylib's
 own Makefile): it wants `make`, a C compiler and `wayland-scanner`.
+bliss (bliss-audio 0.13, the song analysis for the radio) is in
+`vendor/bliss-rs`, built with its symphonia decoder and no ffmpeg; it
+is GPL-3 (its `LICENSE` is there), which a Mascarpone built with it is
+distributed under. SQLite comes with rusqlite, built in. The voice
+models are built in too, run by tract (ONNX, in Rust): YAMNet in
+`vendor/yamnet` (Apache 2.0) and Essentia's voice/instrumental head in
+`vendor/essentia-models` (CC BY-NC-SA 4.0: no commercial use).
 GLFW, inside raylib, opens Wayland or X11 and EGL at run time; the font
 is found by `fc-match`.
 The window draws only when something changes (a key, the pointer, mpd,
@@ -49,6 +58,9 @@ key left out keeps its default, one not known is said on stderr.
     [library]
     music = ~/Music         # mpd's music_directory
     playlists = ~/Music/Playlists
+
+    [radio]
+    threads = 8             # files analyzed at a time: half the cores
 
     [keys]
     play_pause = Space c    # an action = its keys, by spaces
@@ -76,6 +88,7 @@ KP_Subtract, KP_0. Every action and its default keys:
 | `volume_up` `volume_down` | + =, - | five points |
 | `repeat` `repeat_one` | r R | on or off |
 | `go_to_playing` | g | the album or the playlist the queue plays |
+| `radio` | s | the radio from what is selected: a track, an album, an artist |
 | `save_queue` `clear_queue` | | |
 | `refresh` | Ctrl+r | |
 | `zoom_in` `zoom_out` `zoom_reset` | Ctrl+= Ctrl++, Ctrl+-, Ctrl+0 | the keypad's too |
@@ -93,7 +106,9 @@ KP_Subtract, KP_0. Every action and its default keys:
 Albums, Artists, Playlists and Queue in the header, which stays over
 every page; a click on a tab, even the one on, comes back to its list,
 dealt again (the keys below are the defaults: 1 to 4 or Ctrl+Tab
-switch, Escape goes back a page). An album's, a playlist's, an
+switch, Escape goes back a page). The tab lit is the page's kind: an
+album's page lights Albums whatever tab it was opened over, and Escape
+still goes back to that tab. An album's, a playlist's, an
 artist's page and the queue have the same head on top, still (the
 cover or the portrait, the words beside it, an artist's scrolling on
 their own), and under it the tracks or the albums in a block that
@@ -113,9 +128,19 @@ page one track is selected (k and l, or Down and Up, move it; a click
 plays from a row, or pauses the song on): Play and Enter play the list
 from it, or pause and resume when it is the song on; Add to queue
 appends. Space (or c) pauses and resumes anywhere, z, x and v go back,
-stop and go on; Tab shows the queue and, again, hides it: back on the
-tab and the page it was asked from. Ctrl+K lists every command with its
+stop and go on; Tab shows the queue and, again (or Escape), hides it:
+back on the tab and the page it was asked from. A page opens once:
+asked again while it is up (the player bar's album, the artist's name
+on a row), it stays, the track selected; after a refresh the pages up
+are opened again on the new library, in their place. Ctrl+K lists every command with its
 keys: type to find one, Enter does it.
+
+Launched with words while the window is up, Mascarpone sends them to
+it over its socket and ends: `mascarpone tab queue` (or `albums`,
+`artists`, `playlists`), `mascarpone artist Radiohead`, `mascarpone
+album <key>` (the artist, a unit separator, the title), `mascarpone
+search` (the picker on everything), `mascarpone escape` (a dialog
+closed, else back a page). For a script, a screenshot.
 
 The player bar at the bottom has the song's title over the time (a
 click or a drag seeks), where the song is and its length at its ends;
@@ -137,9 +162,9 @@ opens, Escape closes.
 
 The playlists are the m3u files in `Playlists` under the music folder
 (`~/Music`, both set in the configuration), their entries relative to the file; an entry the library
-does not have is shown greyed and skipped. Shuffle, a square button
-after a playlist's (and the queue's, when it plays one) other buttons,
-lit while on (on unless switched off), plays it in a random order
+does not have is shown greyed and skipped. Shuffle, a button after a
+playlist's Play (and first on the queue's, when it plays one), lit
+while on (on unless switched off), plays it in a random order
 (mpd's random mode, the queue in the file's order), from any track; an
 album always plays in order. It is kept in
 `~/.local/state/mascarpone/shuffle.json` by the playlist's name, not in
@@ -162,14 +187,15 @@ box: there is no other font to fall back on.
 ## Artists from the net
 
 An artist's portrait and biography come from the net the first time
-they are shown and are kept in `~/.cache/mascarpone/artists`: MusicBrainz
+they are shown and are kept in the database (the words) and in
+`~/.cache/mascarpone/artists` (the face): MusicBrainz
 names the artist and links it to Wikidata and Wikipedia, whose summary
 gives the words and the lead picture; TheAudioDB (free key `123`) gives
 a portrait by MusicBrainz id and words when Wikipedia has none; Deezer
 a picture when nobody else has one. MusicBrainz is asked once a second
 at most, with `mascarpone/0.1 (https://random.cards)` as User-Agent.
 After the words on an artist's page, Wikipedia's glyph opens the
-article, and the last one forgets what the cache has and asks the net
+article, and the last one forgets what is kept and asks the net
 again.
 
 An album mpd has no cover for gets one from the net, Deezer's or the
@@ -178,19 +204,101 @@ the others when the folder is the album's alone; an album the net has
 nothing for is marked in the cache (`<hash>.none`) and not asked again
 until Ctrl+R, which drops the marks.
 
+## The radio
+
+The radio is a queue that never ends: every track like the ones before
+it. bliss (`vendor/bliss-rs`) listens to every file of the library
+once and keeps what it heard as a vector of 23 numbers (tempo, timbre,
+loudness, chroma); two tracks are alike when their vectors are near.
+The analysis runs on a thread of its own at the lowest priority
+(`[radio] threads` files at a time, half the cores by default) after
+every load of the library, on the files new or changed since (by their
+modification time and size); it shows in the header, on the right, as
+done of how many, and the radio works with what is analyzed so far. A
+file symphonia cannot decode (Opus) is left out, its error in the
+database. In the same pass each file is heard for a voice
+(`src/voice.rs`): YAMNet gives an embedding for every second of sound,
+Essentia's head says of each how likely a voice sings in it, and the
+track keeps the mean and the share of seconds with a voice; over a
+half, the track is vocal. On a few dozen known tracks the mean is
+0.6-0.9 for songs and 0.1-0.35 for instrumentals, with a few in
+between (post-rock, a vocoder, a sampled voice). On the same thread, every artist of the library is looked up
+once on the net, one every few seconds (MusicBrainz's pace), for their
+links to other artists: MusicBrainz's relations (a band's members,
+collaborations, tributes), Wikidata's influences (P737), Deezer's
+related artists; that shows in the header too.
+
+Everything is in `~/.local/share/mascarpone/mascarpone.db`, SQLite,
+by integer ids (`src/db.rs`). The library as mpd gives it, written
+whole at every load and when the playlists are read again, the rows of
+what is gone dropped: `artist` (the albums' artists marked
+`in_library`), `album`, `track` with its tags, `playlist` with its
+shuffle and its origin in two columns, what it came from and the
+origin's address (`queue`; `radio:track`, `radio:album` or
+`radio:artist` with the track's uri, the album's key or the artist's
+name; a service's word, `spotify`, with the playlist's web link, filled
+in by hand for now; both empty for a file from nowhere known, both
+kept over the rewrites) and `playlist_entry` (a row an entry, with the
+track's id when the library has it). On `track` the analysis too: the file's stamp, the features'
+version, every feature in a column of its own, or the error, and the
+voice heard (`voice`, `voiced`, `vocal`). On `artist` what the net says: the MusicBrainz and Deezer ids, the
+biography, the Wikipedia article and whether there is a portrait (the
+artist's page asks the first time; the JSON kept before in
+`~/.cache/mascarpone/artists` is taken in then, the JPEG of the face
+stays there); and in `relation` their links, a row a link with its kind
+and source, the other artist a row of `artist` too (`in_library` 0 when
+the library has none of theirs), found by MusicBrainz id, else Deezer
+id, else name. The window keeps what it needs in memory; the file is
+for the record and for `sqlite3`.
+
+`s` (or the radio button: on an album's and an artist's page, and on
+their cards, right of the play button) starts a radio from what is
+selected: a track, which plays first; an album, whose tracks together are what the
+path starts from, none of them played; an artist, twenty of whose
+tracks open it at random, and whose tracks are all it plays. Whenever
+fewer than five tracks remain after the song on, twenty more are
+added: four sub-blocks of five, each an arc from the seed, always from
+the seed (a track's vector, the mean of an album's or an artist's
+tracks) and never from what played last, a track a part: the
+equilibrium (the seed, steadier), the break (tension: the minor and
+diminished triads up, the loudness and brightness less steady), the
+adventure (faster, louder, brighter, more varied, more vocal), the
+resolution (loud and open, the major up), the new equilibrium (slower,
+quieter, darker, sparser, less vocal). Each part is a shift of the seed's vector along
+bliss's features (`ARC` in `src/radio.rs`), and its track is the
+nearest to that shift, one of the six nearest, the nearer the likelier,
+never one already in the queue. A track by an artist linked
+to the seed's artist counts as nearer: its distance is shortened by
+35% for a relation or an influence, by 25% for an artist Deezer finds
+alike. The distance is over bliss's 23 features and the two of the
+voice, each in -1..1: a song and an instrumental are far apart however
+alike they sound otherwise. And the voice is a ceiling:
+no track more vocal than where the radio started (a track's voice; the
+most vocal track of an album or an artist), so a radio from an
+instrumental plays instrumentals only, one from a song anything; a
+track not heard yet passes. The
+queue shows the radio's glyph and where it started; rows taken out of
+it leave it the radio, anything loaded or appended ends it; it
+survives a restart with the queue. Save, in the queue's head while the
+radio plays (and `save_queue` in Ctrl+K's list), writes the queue so
+far as a playlist, named "Radio" and what it started from (the
+track's title, the album's, the artist's; the name can be changed
+before Enter); the radio goes on.
+
 ## The master list
 
 The queue is mpd's; Mascarpone keeps a pointer to where it was loaded
 from (`~/.local/state/mascarpone/master.json`). Play on an album or a playlist
 loads it whole and points there; Add to queue appends and drops the
-pointer: the queue is then the Anon Playlist, put together by hand, until
-Save as playlist on the Queue tab writes it as an m3u8 file in
-`Playlists` and points there. The player bar's album button shows what
-the queue plays, an album or a playlist (a saved one or the Anon
-Playlist), and opens it. Queue is the fourth tab (`4`); there every row
+pointer: the queue is then put together by hand, shown as the queue
+itself (its glyph, its name), until `save_queue` (in Ctrl+K's list)
+writes it as an m3u8 file in `Playlists` and points there. The player
+bar's album button shows what the queue plays, an album, a playlist or
+the queue, by its glyph, and opens it. Queue is the fourth tab (`4`); there every row
 can be moved up and down (L and K on the selected one) and removed (d or
-Delete), and Clear empties the queue. Other clients change the queue too: when it no
-longer matches the list pointed to, the pointer drops. On a track (a
+Delete); the shuffle of the playlist it plays comes first in its head,
+then Clear, which empties the queue. Other clients change the queue
+too: when it no longer matches the list pointed to, the pointer drops. On a track (a
 selected row of an album or playlist page) `a` adds it to a playlist,
 picked or created by name; a playlist the master points to grows in
 the queue as well.
@@ -215,11 +323,18 @@ the queue as well.
 - `src/bars.rs`: the playing mark, bars that bounce next to the song on.
 - `src/glyphs.rs`: every icon, a glyph of the Nerd Font.
 - `src/mpd.rs`: the connection to mpd on a tokio thread of its own,
-  commands in, events out (status, library, covers).
+  commands in, events out (status, library, covers, the radio's news).
 - `src/library.rs`: albums, tracks and artists built from mpd's
   `listallinfo`, and the playlists read from the m3u files.
 - `src/master.rs`: the queue's pointer, and the playlist files written.
-- `src/net.rs`: portraits, biographies and missing covers from the net.
+- `src/radio.rs`: the analysis thread (bliss on the files, the
+  artists' links asked of the net), the radio's path.
+- `src/db.rs`: the SQLite database: tracks with their analysis, artists,
+  relations, albums, playlists.
+- `src/voice.rs`: the voice heard in a track, YAMNet and Essentia's head
+  run by tract.
+- `src/net.rs`: portraits, biographies, missing covers and the artists'
+  links from the net.
 - `src/covers.rs`: covers from mpd (embedded or the file next to the
   album) or the net, shrunk once into `~/.cache/mascarpone/covers`,
   decoded on threads of their own, the last few hundred shown kept as

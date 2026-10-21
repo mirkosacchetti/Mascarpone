@@ -7,6 +7,7 @@
 //!   [mpd]      host, port, password (MPD_HOST and MPD_PORT, as mpc reads
 //!              them, win when set)
 //!   [library]  music, playlists: the folders
+//!   [radio]    threads: how many files bliss analyzes at a time
 //!   [keys]     an action = the keys that do it, by spaces
 //!
 //! Read once at the start.
@@ -43,6 +44,7 @@ pub enum Shortcut {
     Repeat,
     RepeatOne,
     GoToPlaying,
+    Radio,
     SaveQueue,
     ClearQueue,
     Refresh,
@@ -94,6 +96,7 @@ const ACTIONS: &[(Shortcut, &str, &str, Option<&str>)] = &[
     (Shortcut::Repeat, "repeat", "r", Some("Repeat the queue, on or off")),
     (Shortcut::RepeatOne, "repeat_one", "R", Some("Repeat the song, on or off")),
     (Shortcut::GoToPlaying, "go_to_playing", "g", Some("Go to what plays: its album or playlist")),
+    (Shortcut::Radio, "radio", "s", Some("Radio from what is selected: a track, an album, an artist")),
     (Shortcut::SaveQueue, "save_queue", "", Some("Save the queue as a playlist")),
     (Shortcut::ClearQueue, "clear_queue", "", Some("Clear the queue")),
     (Shortcut::Refresh, "refresh", "Ctrl+r", Some("Refresh: mpd's database, the library")),
@@ -226,6 +229,8 @@ pub struct Config {
     pub password: Option<String>,
     pub music: PathBuf,
     pub playlists: PathBuf,
+    /// Files analyzed at a time, for the radio.
+    pub threads: usize,
     keys: HashMap<Shortcut, Vec<Chord>>,
     /// The keys as written, for the commands' picker.
     labels: HashMap<Shortcut, String>,
@@ -295,6 +300,9 @@ fn load() -> Config {
     let password = env_password.or_else(|| take("mpd", "password"));
     let music = take("library", "music").map(home).unwrap_or_else(crate::dirs::music);
     let playlists = take("library", "playlists").map(home).unwrap_or_else(|| music.join("Playlists"));
+    // half the cores by default: the analysis is for the background
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let threads = take("radio", "threads").and_then(|t| t.parse().ok()).filter(|&n| n > 0).unwrap_or((cores / 2).max(1));
 
     let mut keys = HashMap::new();
     let mut labels = HashMap::new();
@@ -320,7 +328,7 @@ fn load() -> Config {
     for (section, key) in values.keys() {
         eprintln!("{}: [{section}] {key}: not a setting", path.display());
     }
-    Config { host, port, password, music, playlists, keys, labels }
+    Config { host, port, password, music, playlists, threads, keys, labels }
 }
 
 /// The line without its comment: `#` at the start, or after a space (a

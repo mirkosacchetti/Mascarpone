@@ -23,6 +23,10 @@ pub fn state() -> PathBuf {
     xdg("XDG_STATE_HOME", &[".local", "state"])
 }
 
+pub fn data() -> PathBuf {
+    xdg("XDG_DATA_HOME", &[".local", "share"])
+}
+
 pub fn config() -> PathBuf {
     xdg("XDG_CONFIG_HOME", &[".config"])
 }

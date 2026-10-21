@@ -201,6 +201,11 @@ impl Library {
         for album in &mut albums {
             album.tracks.sort_by_key(|t| (t.disc, t.number));
         }
+        Library::assemble(albums)
+    }
+
+    /// The library from its albums: sorted, indexed, the playlists read.
+    fn assemble(mut albums: Vec<Album>) -> Library {
         // albums by title; artists by name, each one's albums by year
         albums.sort_by_cached_key(|a| (sort_name(&a.title), sort_name(&a.artist)));
         let mut by_artist: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -225,6 +230,23 @@ impl Library {
         library
     }
 
+    /// A library for the tests: albums as (artist, title, tracks).
+    #[cfg(test)]
+    pub fn of(albums: &[(&str, &str, usize)]) -> Library {
+        let albums = albums
+            .iter()
+            .map(|(artist, title, n)| Album {
+                key: format!("{artist}\u{1f}{title}"),
+                title: title.to_string(),
+                artist: artist.to_string(),
+                year: None,
+                tracks: (1..=*n).map(|i| Track { uri: format!("{artist}/{title}/{i}.ogg"), title: format!("{title} {i}"), artist: artist.to_string(), disc: 1, number: i as u64, duration: None }).collect(),
+                loose: false,
+            })
+            .collect();
+        Library::assemble(albums)
+    }
+
     pub fn playlists(&self) -> RwLockReadGuard<'_, Vec<Playlist>> {
         self.playlists.read().unwrap()
     }
@@ -240,6 +262,10 @@ impl Library {
 
     pub fn album_by_key(&self, key: &str) -> Option<&Album> {
         self.album_by_key.get(key).map(|&i| &self.albums[i])
+    }
+
+    pub fn album_index(&self, key: &str) -> Option<usize> {
+        self.album_by_key.get(key).copied()
     }
 
     /// The album a track is in, and its place there.

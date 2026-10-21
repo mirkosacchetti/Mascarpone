@@ -31,6 +31,11 @@ pub const HOVER: Color = hex(0x304860);
 pub const ACCENT_BG: Color = hex(0x4d86b0);
 pub const ACCENT: Color = hex(0x8bc9eb);
 pub const DESTRUCTIVE: Color = hex(0xbf616a);
+const DESTRUCTIVE_HOVER: Color = hex(0xc86e77);
+const DESTRUCTIVE_ACTIVE: Color = hex(0xa9545c);
+const SUGGESTED_HOVER: Color = hex(0x5a92bb);
+const SUGGESTED_ACTIVE: Color = hex(0x3f7199);
+const WHITE: Color = hex(0xffffff);
 pub const BIO: Color = hex(0xc0cdd9);
 /// Over the window, under a dialog.
 pub const DIM: Color = Color { r: 0, g: 0, b: 0, a: 92 };
@@ -119,18 +124,31 @@ impl Style {
 /// lists'.
 pub const CORNER: f32 = 0.5;
 
-/// How a button looks.
+/// How a square button looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Look {
     /// A plain button, light glyph on a light shade.
     Plain,
-    /// Play: in the accent.
+    /// Play, the radio: in the accent.
     Suggested,
     /// Clear: in red.
     Destructive,
     /// Only the glyph, in red, a shade under the pointer: a playlist's
     /// delete.
     Danger,
+}
+
+impl Look {
+    /// The button's shade and its glyph's colour, under the pointer and
+    /// held down; no shade for a flat one.
+    fn colors(self, over: bool, held: bool) -> (Option<Color>, Color) {
+        match self {
+            Look::Plain => (Some(if held { BUTTON_ACTIVE } else if over { BUTTON_HOVER } else { BUTTON }), FG),
+            Look::Suggested => (Some(if held { SUGGESTED_ACTIVE } else if over { SUGGESTED_HOVER } else { ACCENT_BG }), BG),
+            Look::Destructive => (Some(if held { DESTRUCTIVE_ACTIVE } else if over { DESTRUCTIVE_HOVER } else { DESTRUCTIVE }), WHITE),
+            Look::Danger => (if held { Some(BUTTON_HOVER) } else if over { Some(FLAT_HOVER) } else { None }, DESTRUCTIVE),
+        }
+    }
 }
 
 /// A view that scrolls: where it is, and how tall its content was.
@@ -640,22 +658,27 @@ impl Ui {
         face.draw_centered(glyph, r.center(), self.tint(c));
     }
 
-    /// A button filling `r`, only its glyph at `em` rem; true on a click.
-    pub fn button(&mut self, r: R, glyph: &str, em: f32, look: Look, sensitive: bool) -> bool {
+    /// The one square button of the window, at `x`, `y`: the player's,
+    /// the pages' heads', the cards'. Its side is `square_side`, its glyph
+    /// at 1.25 rem, its corners rounded; half seen when not sensitive.
+    /// True on a click.
+    pub fn square(&mut self, x: f32, y: f32, glyph: &str, look: Look, sensitive: bool) -> bool {
+        let side = self.square_side();
+        let r = R::new(x, y, side, side);
         let over = sensitive && self.hovered(r);
-        let held = over && self.held(r);
-        let (bg, fg) = match look {
-            Look::Plain => (Some(if held { BUTTON_ACTIVE } else if over { BUTTON_HOVER } else { BUTTON }), FG),
-            Look::Suggested => (Some(if held { hex(0x3f7199) } else if over { hex(0x5a92bb) } else { ACCENT_BG }), BG),
-            Look::Destructive => (Some(if held { hex(0xa9545c) } else if over { hex(0xc86e77) } else { DESTRUCTIVE }), hex(0xffffff)),
-            Look::Danger => (if held { Some(BUTTON_HOVER) } else if over { Some(FLAT_HOVER) } else { None }, DESTRUCTIVE),
-        };
+        let (bg, fg) = look.colors(over, over && self.held(r));
         self.with_alpha(if sensitive { 1.0 } else { 0.5 }, |ui| {
             if let Some(bg) = bg {
                 ui.rounded(r, rem(CORNER), bg);
             }
-            ui.icon(glyph, r, em, fg);
+            ui.icon(glyph, r, 1.25, fg);
         });
         sensitive && self.click(r)
+    }
+
+    /// The square buttons' side: a line of the header's style, two rem
+    /// at least.
+    pub fn square_side(&self) -> f32 {
+        self.line(Style::Header).max(rem(2.0))
     }
 }

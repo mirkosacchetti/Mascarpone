@@ -37,6 +37,8 @@ pub const DISCONNECTED: &str = "\u{f0319}";
 pub const REFRESH: &str = "\u{f05c2}";
 /// A command, in the commands' picker: a keyboard.
 pub const COMMAND: &str = "\u{f030c}";
+/// The radio: the queue that goes on by itself, by likeness.
+pub const RADIO: &str = "\u{f043c}";
 
 /// Every glyph, for the faces that draw only them.
-pub const ALL: &[&str] = &[APP, ALBUM, TRACK, ARTIST, PLAYLIST, QUEUE, ADD, QUEUE_ADD, REPEAT, REPEAT_ONE, PREVIOUS, NEXT, PLAY, PAUSE, SAVE, CLEAR, UP, DOWN, REMOVE, SHUFFLE, DELETE, MISSING, YEAR, LENGTH, RETRY, WIKIPEDIA, NOTHING, FOLDER, CONNECTED, DISCONNECTED, REFRESH, COMMAND];
+pub const ALL: &[&str] = &[APP, ALBUM, TRACK, ARTIST, PLAYLIST, QUEUE, ADD, QUEUE_ADD, REPEAT, REPEAT_ONE, PREVIOUS, NEXT, PLAY, PAUSE, SAVE, CLEAR, UP, DOWN, REMOVE, SHUFFLE, DELETE, MISSING, YEAR, LENGTH, RETRY, WIKIPEDIA, NOTHING, FOLDER, CONNECTED, DISCONNECTED, REFRESH, COMMAND, RADIO];

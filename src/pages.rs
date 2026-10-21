@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::app::{Action, App, Grid, Page};
+use crate::app::{Action, App, Grid};
 use crate::glyphs;
 use crate::library::{self, Library, Playlist};
 use crate::master::Source;
 use crate::mpd::Command;
 use crate::picker::{Kind, Modal};
+use crate::radio::Seed;
 use crate::rl::{self, Input};
 use crate::size::{self, rem};
 use crate::ui::{self, Look, Style, Ui, R};
@@ -35,6 +36,7 @@ pub fn length(d: Duration) -> String {
 }
 
 /// What a list page's Play does.
+#[derive(PartialEq, Eq)]
 pub enum Plays {
     /// Loads the list on the queue, the master pointing to the source.
     Load(Source),
@@ -73,6 +75,11 @@ pub struct Tracks {
     pub shuffle: Option<(PathBuf, bool)>,
     /// A playlist's delete, at the bottom.
     pub delete: Option<(PathBuf, String)>,
+    /// The queue's save as a playlist, with the name proposed: the
+    /// radio's queue, "Radio" and what it started from.
+    pub save: Option<String>,
+    /// What the radio starts from on the head's button: the album.
+    pub seed: Option<Seed>,
     pub rows: Vec<Row>,
     /// The playable rows' uris, in order.
     pub uris: Vec<String>,
@@ -99,6 +106,8 @@ impl Tracks {
             facts,
             shuffle: None,
             delete: None,
+            save: None,
+            seed: None,
             rows,
             uris,
             selected: None,
@@ -119,11 +128,11 @@ impl Tracks {
         if album.loose {
             facts.push(glyphs::FOLDER.to_owned());
         }
+        facts.push(count(album.tracks.len(), glyphs::TRACK));
+        facts.push(length(album.duration()));
         if let Some(year) = &album.year {
             facts.push(format!("{} {year}", glyphs::YEAR));
         }
-        facts.push(count(album.tracks.len(), glyphs::TRACK));
-        facts.push(length(album.duration()));
         let discs = album.discs();
         let rows = album
             .tracks
@@ -145,6 +154,7 @@ impl Tracks {
         t.uris = album.uris();
         t.cover = Some((album.key.clone(), album.cover_uri().to_owned()));
         t.to_artist = Some(album.artist.clone());
+        t.seed = Some(Seed::Album(album.key.clone()));
         t
     }
 
@@ -188,8 +198,9 @@ impl Tracks {
     /// The master, for its tab: the queue as mpd has it, with where it
     /// came from, the song on selected (or the row selected before); a
     /// row plays from there. Every row has keys to move it up and down
-    /// and to remove it (L, K, d or Delete on the selected one); Save as
-    /// writes the queue as a playlist file, Clear empties it.
+    /// and to remove it (L, K, d or Delete on the selected one); on a
+    /// radio, Save writes the queue as a playlist file ("Radio" and what
+    /// it started from, to be changed), Clear empties it.
     pub fn queue(app: &App) -> Tracks {
         let library = app.library.clone();
         let (title, subtitle) = match &library {
@@ -233,10 +244,11 @@ impl Tracks {
         let selected = app.queue_row.filter(|&r| r < n).unwrap_or(on);
         let mut t = Tracks::new(library, Plays::Queue, title, subtitle, facts, rows, selected);
         t.uris = uris;
-        // a playlist's shuffle, as on its page
+        // a playlist's shuffle, as on its page; a radio's save
         if let crate::master::Source::Playlist { path } = &app.master.source {
             t.shuffle = Some((path.clone(), crate::master::shuffled(path)));
         }
+        t.save = t.library.as_ref().and_then(|l| app.master.radio_name(l));
         t
     }
 
@@ -248,6 +260,11 @@ impl Tracks {
     fn selection(&self) -> Option<(usize, &str)> {
         let start = self.rows.get(self.selected?)?.start?;
         Some((start, self.uris[start].as_str()))
+    }
+
+    /// The selected row's track, if it plays.
+    pub fn selected_uri(&self) -> Option<String> {
+        self.selection().map(|(_, uri)| uri.to_owned())
     }
 
     /// A row selected (the picker's), the one that plays on Enter here.
@@ -419,7 +436,7 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     let title_lines = ui.face(Style::Title).wrap(&t.title, fw, 2);
     let sub_lines = if t.subtitle.is_empty() { Vec::new() } else { ui.face(Style::Header).wrap(&t.subtitle, fw, 1) };
     let (lt, lh) = (ui.line(Style::Title), ui.line(Style::Header));
-    let button = crate::player::button_size(ui);
+    let button = ui.square_side();
     if let Some((key, uri)) = &t.cover {
         let r = R::new(x0, head.y, pic, pic);
         match app.pictures.cover(key, uri) {
@@ -453,35 +470,51 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     fy += lh + s;
     let mut bx = fx;
     let mut next = |ui: &mut Ui, glyph: &str, look: Look, sensitive: bool| {
-        let r = R::new(bx, fy, button, button);
+        let x = bx;
         bx += button + rem(0.5);
-        ui.button(r, glyph, 1.25, look, sensitive)
+        ui.square(x, fy, glyph, look, sensitive)
     };
-    let here = t.selection().is_some_and(|(_, uri)| current == Some(uri));
     let any = !t.uris.is_empty();
-    if next(ui, if here && playing { glyphs::PAUSE } else { glyphs::PLAY }, Look::Suggested, any) {
-        t.play_selected(app);
-    }
+    let shuffle = t.shuffle.clone().map(|(path, on)| (path, on, if on { Look::Suggested } else { Look::Plain }));
     match t.plays {
+        // play from the selection, a playlist's shuffle, add to the queue
         Plays::Load(_) => {
+            let here = t.selection().is_some_and(|(_, uri)| current == Some(uri));
+            if next(ui, if here && playing { glyphs::PAUSE } else { glyphs::PLAY }, Look::Suggested, any) {
+                t.play_selected(app);
+            }
+            if let Some((path, on, look)) = shuffle {
+                if next(ui, glyphs::SHUFFLE, look, true) {
+                    app.act(Action::Shuffle(path, !on));
+                }
+            }
             if next(ui, glyphs::QUEUE_ADD, Look::Plain, any) {
                 app.act(Action::Append(t.uris.clone()));
             }
+            // the radio from the album
+            if let Some(seed) = &t.seed {
+                if next(ui, glyphs::RADIO, Look::Plain, app.vectors.is_some()) {
+                    app.act(Action::Radio(seed.clone()));
+                }
+            }
         }
+        // the player plays it: the shuffle of the playlist it plays, a
+        // radio's save as a playlist, and clear
         Plays::Queue => {
-            if next(ui, glyphs::SAVE, Look::Plain, any) {
-                app.act(Action::Modal(Modal::name()));
+            if let Some((path, on, look)) = shuffle {
+                if next(ui, glyphs::SHUFFLE, look, true) {
+                    app.act(Action::Shuffle(path, !on));
+                }
+            }
+            if let Some(name) = &t.save {
+                if next(ui, glyphs::SAVE, Look::Plain, any) {
+                    app.act(Action::Modal(Modal::name(Some(name.clone()))));
+                }
             }
             if next(ui, glyphs::CLEAR, Look::Destructive, any) {
                 app.act(Action::QueueRow(None));
                 app.act(Action::Mpd(Command::Clear));
             }
-        }
-    }
-    // a playlist's shuffle after them, lit while on
-    if let Some((path, on)) = &t.shuffle {
-        if ui.button(R::new(bx, fy, button, button), glyphs::SHUFFLE, 1.25, if *on { Look::Suggested } else { Look::Plain }, true) {
-            app.act(Action::Shuffle(path.clone(), !on));
         }
     }
 
@@ -506,7 +539,7 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
 
     if let Some((path, name)) = &t.delete {
         y += rem(1.0);
-        if ui.button(R::new(x0, y, button, button), glyphs::DELETE, 1.25, Look::Danger, true) {
+        if ui.square(x0, y, glyphs::DELETE, Look::Danger, true) {
             app.act(Action::Modal(Modal::delete(path.clone(), name.clone())));
         }
         y += button;
@@ -623,7 +656,7 @@ fn draw_row(app: &App, t: &mut Tracks, i: usize, r: R, ui: &mut Ui, current: Opt
                 let (click, _) = ui.link(Style::Subtitle, &library.albums[a].title, x, ly, (end - x).max(0.0));
                 if click {
                     clicked_inside = true;
-                    app.act(Action::Push(Page::Album(Tracks::album(library, a, track))));
+                    app.act(Action::OpenAlbum { key: library.albums[a].key.clone(), track });
                 }
             }
             if let Some(text) = &row.plain {
@@ -674,6 +707,10 @@ pub struct ArtistPage {
 }
 
 impl ArtistPage {
+    pub fn name(&self) -> &str {
+        &self.library.artists[self.index].name
+    }
+
     pub fn new(library: &Arc<Library>, index: usize) -> ArtistPage {
         let mut albums = library.artists[index].albums.clone();
         albums.sort_by_key(|&a| std::cmp::Reverse(library.albums[a].year.as_deref().and_then(|y| y.get(..4)?.parse::<u32>().ok())));
@@ -704,13 +741,20 @@ pub fn draw_artist(app: &App, page: &mut ArtistPage, ui: &mut Ui, area: R) {
         None => ui.placeholder(glyphs::ARTIST, portrait, true),
     }
     let wx = x0 + side + rem(1.5);
-    let ww = (x0 + cw - wx).max(rem(4.0));
+    // the radio from the artist, at the end of the name's line
+    let button = ui.square_side();
+    let bx = x0 + cw - button;
+    if ui.square(bx, head.y, glyphs::RADIO, Look::Plain, app.vectors.is_some()) {
+        app.act(Action::Radio(Seed::Artist(artist.name.clone())));
+    }
+    let ww = (bx - rem(1.0) - wx).max(rem(4.0));
     let mut wy = head.y;
     let lt = ui.line(Style::Title);
     for line in ui.face(Style::Title).wrap(&artist.name, ww, 1) {
         ui.text(Style::Title, &line, wx, wy, ww);
         wy += lt;
     }
+    let ww = (x0 + cw - wx).max(rem(4.0));
     // the words, then glyphs as links: the article's, then the retry; in
     // the rest of the head, scrolling
     if let Some(known) = app.pictures.words(&artist.name) {

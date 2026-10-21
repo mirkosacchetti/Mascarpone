@@ -309,15 +309,14 @@ impl Pictures {
         self.known.borrow_mut().insert(name.to_owned(), Known { bio: info.bio.clone(), url: info.wikipedia.clone(), portrait: info.portrait });
     }
 
-    /// A new try from the net for an artist: the cache and what is kept
-    /// forgotten, asked again.
+    /// A new try from the net for an artist: what is kept forgotten (on
+    /// mpd's thread, which has the database), asked again.
     pub fn retry(&self, name: &str) {
-        crate::net::forget(name);
         self.known.borrow_mut().remove(name);
-        self.asked.borrow_mut().remove(name);
         if let Some(Slot::Ready(t, _)) = self.slots.borrow_mut().remove(&format!("a:{name}")) {
             self.dropped.borrow_mut().push(t);
         }
-        self.ask(name);
+        self.asked.borrow_mut().insert(name.to_owned());
+        let _ = self.commands.send(Command::ForgetArtist(name.to_owned()));
     }
 }

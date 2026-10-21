@@ -4,7 +4,9 @@
 //! Playlist, until it is saved as a playlist. The queue is mpd's,
 //! other clients change it too: whenever it stops matching the list the
 //! pointer came from, the pointer drops. The pointer is kept on disk, so
-//! it survives a restart as long as the queue does.
+//! it survives a restart as long as the queue does. The radio is a
+//! source too: its queue grows by Mascarpone's own hand, and rows taken
+//! out of it leave it the radio.
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::glyphs;
 use crate::library::{self, Library};
-
-/// What the queue is not yet saved as: put together by hand.
-pub const ANON: &str = "Anon Playlist";
+use crate::radio::Seed;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
@@ -24,8 +24,10 @@ pub enum Source {
     Album { key: String },
     /// A saved playlist, its file.
     Playlist { path: PathBuf },
-    /// The Anon Playlist: put together by hand, not saved.
+    /// The queue put together by hand, not saved: shown as the queue.
     Anon,
+    /// The radio, from where it started: grows by itself.
+    Radio { seed: Seed },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,22 +85,31 @@ impl Master {
         self.save();
     }
 
-    /// Appended to: the pointer drops to the Anon Playlist.
+    /// Appended to: the pointer drops to Anon, the queue by hand.
     pub fn append(&mut self, uris: &[String]) {
         self.source = Source::Anon;
         self.uris.extend_from_slice(uris);
         self.save();
     }
 
+    /// The radio's queue grown: the pointer stays.
+    pub fn grow(&mut self, uris: &[String]) {
+        self.uris.extend_from_slice(uris);
+        self.save();
+    }
+
     /// The queue as mpd has it now: when it is not what the pointer says,
-    /// the pointer drops to the Anon Playlist (or to None when the queue
-    /// is empty).
+    /// the pointer drops to Anon (or to None when the queue
+    /// is empty). The radio's queue with rows taken out stays the radio's.
     pub fn reconcile(&mut self, queue: &[String]) {
         if self.uris == queue {
             return;
         }
+        let kept = self.keeps_radio(queue);
         self.uris = queue.to_vec();
-        self.source = if queue.is_empty() { Source::None } else { Source::Anon };
+        if !kept {
+            self.source = if queue.is_empty() { Source::None } else { Source::Anon };
+        }
         self.save();
     }
 
@@ -112,19 +123,60 @@ impl Master {
                 None => ("Queue".into(), glyphs::ALBUM.into()),
             },
             Source::Playlist { path } => (format!("{}  {}", glyphs::PLAYLIST, path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()), String::new()),
-            Source::Anon => (format!("{}  {ANON}", glyphs::PLAYLIST), String::new()),
+            Source::Anon => (format!("{}  Queue", glyphs::QUEUE), String::new()),
+            Source::Radio { seed } => {
+                let (name, detail) = match seed {
+                    Seed::Track(uri) => match library.place(uri) {
+                        Some((a, t)) => (library.albums[a].tracks[t].title.clone(), library.albums[a].tracks[t].artist.clone()),
+                        None => (uri.clone(), String::new()),
+                    },
+                    Seed::Album(key) => match library.album_by_key(key) {
+                        Some(a) => (a.title.clone(), a.artist.clone()),
+                        None => (String::new(), String::new()),
+                    },
+                    Seed::Artist(name) => (name.clone(), String::new()),
+                };
+                (format!("{}  {name}", glyphs::RADIO), detail)
+            }
         }
     }
 
-    /// The playlist the queue plays, by name: a saved one's, or the Anon
-    /// Playlist; none for an album or an empty queue.
-    pub fn playlist(&self) -> Option<String> {
+    /// The radio's name, for a playlist saved from it: "Radio" and what
+    /// it started from (the track's title, the album's, the artist's).
+    pub fn radio_name(&self, library: &Library) -> Option<String> {
+        let Source::Radio { seed } = &self.source else { return None };
+        let name = match seed {
+            Seed::Track(uri) => library.place(uri).map(|(a, t)| library.albums[a].tracks[t].title.clone())?,
+            Seed::Album(key) => library.album_by_key(key)?.title.clone(),
+            Seed::Artist(name) => name.clone(),
+        };
+        Some(format!("Radio {name}"))
+    }
+
+    /// The glyph of what the queue plays: an album (the song's, when
+    /// nothing was loaded here), a playlist, or the queue itself.
+    pub fn glyph(&self) -> &'static str {
         match &self.source {
-            Source::Playlist { path } => Some(path.file_stem()?.to_string_lossy().into_owned()),
-            Source::Anon => Some(ANON.into()),
-            Source::None | Source::Album { .. } => None,
+            Source::Playlist { .. } => glyphs::PLAYLIST,
+            Source::Anon => glyphs::QUEUE,
+            Source::Radio { .. } => glyphs::RADIO,
+            Source::None | Source::Album { .. } => glyphs::ALBUM,
         }
     }
+}
+
+impl Master {
+    /// Whether the queue, changed, is still the radio's: rows taken out
+    /// of it, none added or moved.
+    fn keeps_radio(&self, queue: &[String]) -> bool {
+        matches!(self.source, Source::Radio { .. }) && !queue.is_empty() && subsequence(queue, &self.uris)
+    }
+}
+
+/// Whether `short` is `long` with some taken out, the order kept.
+fn subsequence(short: &[String], long: &[String]) -> bool {
+    let mut it = long.iter();
+    short.iter().all(|s| it.any(|l| l == s))
 }
 
 /// A playlist file's line for a uri: relative to the Playlists folder,
@@ -206,6 +258,20 @@ pub fn append_to_playlist(path: &Path, uri: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_taken_out_keep_the_radio() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(subsequence(&s(&["a", "c"]), &s(&["a", "b", "c"])));
+        assert!(!subsequence(&s(&["c", "a"]), &s(&["a", "b", "c"])));
+        assert!(!subsequence(&s(&["a", "d"]), &s(&["a", "b", "c"])));
+        let m = Master { source: Source::Radio { seed: Seed::Artist("x".into()) }, uris: s(&["a", "b", "c"]) };
+        assert!(m.keeps_radio(&s(&["a", "c"])));
+        assert!(!m.keeps_radio(&s(&["a", "c", "z"])));
+        assert!(!m.keeps_radio(&s(&[])));
+        let m = Master { source: Source::Anon, uris: s(&["a", "b", "c"]) };
+        assert!(!m.keeps_radio(&s(&["a", "c"])));
+    }
 
     #[test]
     fn shuffle_is_on_until_switched_off() {

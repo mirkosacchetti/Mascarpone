@@ -31,15 +31,9 @@ const BIG: f32 = 3.25;
 /// Around the song's title, in rem.
 const PAD: f32 = 1.0;
 
-/// The buttons' side, the player's and the pages' heads': a line, two
-/// rem at least.
-pub fn button_size(ui: &Ui) -> f32 {
-    ui.line(Style::Header).max(rem(2.0))
-}
-
 pub fn height(ui: &Ui) -> f32 {
     // the times, the time, the transport
-    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(button_size(ui)) + rem(BOTTOM)
+    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(ui.square_side()) + rem(BOTTOM)
 }
 
 pub fn draw(app: &App, ui: &mut Ui, r: R) {
@@ -94,7 +88,7 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     // and flat, and between them the big one, play while paused, pause
     // while playing; the square buttons beside it level with its middle,
     // the album's and the artist's on the left, the repeats on the right
-    let rh = button_size(ui);
+    let rh = ui.square_side();
     let (small, big, margin) = (rem(2.25), rem(BIG), rem(0.5));
     let mid = bar.bottom() + rem(EDGE) + big.max(rh) / 2.0;
     let row = (mid - rh / 2.0).round();
@@ -136,16 +130,15 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let repeats = x0 + cw - 2.0 * rh - rem(0.5);
     let mut x = repeats;
     for (glyph, on, command) in [(glyphs::REPEAT, repeat && !single, Command::RepeatAll), (glyphs::REPEAT_ONE, repeat && single, Command::RepeatOne)] {
-        if ui.button(R::new(x, row, rh, rh), glyph, 1.25, if on { Look::Suggested } else { Look::Plain }, true) {
+        if ui.square(x, row, glyph, if on { Look::Suggested } else { Look::Plain }, true) {
             app.act(Action::Mpd(if on { Command::RepeatOff } else { command }));
         }
         x += rh + rem(0.5);
     }
 
     // the left: the song's artist, that opens the page of the artist the
-    // album is filed under, and the album or playlist the queue plays,
-    // with its glyph, that opens its page
-    let glyph = if app.master.playlist().is_some() { glyphs::PLAYLIST } else { glyphs::ALBUM };
+    // album is filed under, and what the queue plays (an album, a
+    // playlist, the queue itself), with its glyph, that opens it
     let place = match app.current().0 {
         Some(uri) => app.library.as_ref().and_then(|l| l.place(uri).map(|(a, t)| (l.clone(), a, t))),
         None => app.waiting(),
@@ -154,13 +147,13 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         Some((library, a, _)) => Some(library.albums[*a].artist.clone()),
         None => now.and_then(|n| n.song.as_ref()).and_then(|s| s.song.artists().first().cloned()),
     };
-    if (now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.playlist().is_some())
-        && ui.button(R::new(x0 + rh + rem(0.5), row, rh, rh), glyph, 1.25, Look::Plain, true)
+    if (now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.source != Source::None)
+        && ui.square(x0 + rh + rem(0.5), row, app.master.glyph(), Look::Plain, true)
     {
         open_source(app);
     }
     if let Some(filed) = artist {
-        if ui.button(R::new(x0, row, rh, rh), glyphs::ARTIST, 1.25, Look::Plain, true) {
+        if ui.square(x0, row, glyphs::ARTIST, Look::Plain, true) {
             app.act(Action::OpenArtist(filed));
         }
     }
@@ -191,11 +184,13 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
 pub fn open_source(app: &App) {
     match &app.master.source {
         Source::Playlist { path } => app.act(Action::OpenPlaylist(path.clone())),
-        Source::Anon => app.act(Action::Tab(Tab::Queue)),
+        Source::Anon | Source::Radio { .. } => app.act(Action::Tab(Tab::Queue)),
         Source::Album { .. } | Source::None => {
             let (Some(uri), _) = app.current() else { return };
-            if let Some((album, track)) = app.library.as_ref().and_then(|l| l.place(uri)) {
-                app.act(Action::OpenAlbum { album, track });
+            if let Some(library) = &app.library {
+                if let Some((album, track)) = library.place(uri) {
+                    app.act(Action::OpenAlbum { key: library.albums[album].key.clone(), track });
+                }
             }
         }
     }

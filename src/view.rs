@@ -10,7 +10,7 @@ use crate::app::{Action, App, Grid, Page, Tab, TABS};
 use crate::glyphs;
 use crate::library::Library;
 use crate::master::Source;
-use crate::pages::{self, count, length, ArtistPage, Tracks};
+use crate::pages::{self, count, length, Tracks};
 use crate::size::{self, rem};
 use crate::ui::{self, Look, Style, Ui, R};
 
@@ -55,9 +55,17 @@ fn tab_height(ui: &Ui) -> f32 {
 
 /// The app's mark and name on the left, written like a tab's; the tabs
 /// in the middle of the window, each its key (1 to 4) and its glyph,
-/// lit while on. A click, even on the tab already on, comes back to its
-/// list, dealt again.
+/// lit while on: the page's kind when a page is up (an album's page
+/// lights Albums, whatever tab it was opened over), else the tab. A
+/// click, even on the tab already on, comes back to its list, dealt
+/// again.
 fn draw_header(app: &App, ui: &mut Ui, h: f32) {
+    let lit = match app.pages.last() {
+        Some(Page::Album(_)) => Tab::Albums,
+        Some(Page::Artist(_)) => Tab::Artists,
+        Some(Page::Playlist(_)) => Tab::Playlists,
+        None => app.tab,
+    };
     ui.rect(R::new(0.0, 0.0, ui.w, h), ui::BG);
     let th = tab_height(ui);
     let y = rem(0.5);
@@ -75,7 +83,7 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
         let w = tab_w(i);
         let r = R::new(x, y, w, th);
         let over = ui.hovered(r);
-        if *tab == app.tab {
+        if *tab == lit {
             ui.rounded(r, rem(ui::CORNER), if over { ui::HOVER } else { ui::SHADE });
         } else if over {
             ui.rounded(r, rem(ui::CORNER), ui::FLAT_HOVER);
@@ -87,6 +95,23 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
             app.act(Action::Tab(*tab));
         }
         x += w + rem(0.25);
+    }
+
+    // the right: the radio's analysis and the artists' links going, as
+    // done of how many, each after its glyph
+    let mut right = ui.w - rem(1.0);
+    let ly = y + rem(0.25) + ((side - ui.line(Style::Subtitle)) / 2.0).round();
+    for (glyph, going) in [(glyphs::ARTIST, app.linking), (glyphs::TRACK, app.analyzing)] {
+        let Some((done, total)) = going else { continue };
+        let text = format!("{done} / {total}");
+        right -= ui.text_right(Style::Subtitle, &text, right, ly) + rem(0.5);
+        let g = ui.line(Style::Subtitle);
+        ui.icon(glyph, R::new(right - g, ly, g, g), 1.0, ui::ACCENT);
+        right -= g + rem(1.0);
+    }
+    if app.analyzing.is_some() || app.linking.is_some() {
+        let g = ui.line(Style::Subtitle);
+        ui.icon(glyphs::RADIO, R::new(right - g, ly, g, g), 1.0, ui::FG);
     }
 }
 
@@ -222,12 +247,17 @@ pub fn draw_grid(app: &App, ui: &mut Ui, grid: &mut Grid, cards: Cards, x: f32, 
     rows as f32 * rh
 }
 
-/// The play button in the bottom right corner of a card's picture,
-/// plain as the player's; true on a click.
+/// A card's buttons: the window's square button, in the bottom right
+/// corner of the card's picture, the `nth` from the corner (0 the
+/// corner), in the accent like a page's Play.
+fn card_button(ui: &mut Ui, picture: R, nth: usize, glyph: &str, sensitive: bool) -> bool {
+    let b = ui.square_side();
+    ui.square(picture.right() - rem(0.5) - b - nth as f32 * (b + rem(0.5)), picture.bottom() - rem(0.5) - b, glyph, Look::Suggested, sensitive)
+}
+
+/// The play button in the corner; true on a click.
 fn play_button(ui: &mut Ui, picture: R) -> bool {
-    let b = rem(2.75);
-    let r = R::new(picture.right() - rem(0.5) - b, picture.bottom() - rem(0.5) - b, b, b);
-    ui.button(r, glyphs::PLAY, 1.0, Look::Plain, true)
+    card_button(ui, picture, 0, glyphs::PLAY, true)
 }
 
 fn card_background(ui: &Ui, cell: R, over: bool, selected: bool) {
@@ -238,10 +268,11 @@ fn card_background(ui: &Ui, cell: R, over: bool, selected: bool) {
     }
 }
 
-/// An album's card: the cover, a play button on it (on the card under
-/// the pointer and on the selected one), the title, the artist (a link to
-/// their page) and the year. A click opens the album. True under the
-/// pointer.
+/// An album's card: the cover, a play button and, to its right, a radio
+/// button on it (on the card under the pointer and on the selected
+/// one), the title,
+/// the artist (a link to their page) and the year. A click opens the
+/// album. True under the pointer.
 fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize, selected: bool) -> bool {
     let album = &library.albums[a];
     let over = ui.hovered(cell);
@@ -253,8 +284,14 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
         Some(t) => ui.picture(t, cover),
         None => ui.placeholder(glyphs::ALBUM, cover, false),
     }
-    if (over || selected) && play_button(ui, cover) {
-        app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
+    // play, and the radio to its right in the corner
+    if over || selected {
+        if card_button(ui, cover, 1, glyphs::PLAY, true) {
+            app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
+        }
+        if card_button(ui, cover, 0, glyphs::RADIO, app.vectors.is_some()) {
+            app.act(Action::Radio(crate::radio::Seed::Album(album.key.clone())));
+        }
     }
     let y = cover.bottom() + rem(0.25);
     ui.text(Style::Header, &album.title, cover.x, y, side);
@@ -265,14 +302,15 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
         app.act(Action::OpenArtist(album.artist.clone()));
     }
     if ui.click(cell) {
-        app.act(Action::Push(Page::Album(Tracks::album(library, a, 0))));
+        app.act(Action::OpenAlbum { key: album.key.clone(), track: 0 });
     }
     over
 }
 
 /// An artist's card: a round portrait as big as a cover (a placeholder
-/// until the picture comes), the name, the number of albums. A click
-/// opens the artist.
+/// until the picture comes), a radio button on it (on the card under
+/// the pointer and on the selected one), the name, the number of
+/// albums. A click opens the artist.
 fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize, selected: bool) -> bool {
     let artist = &library.artists[i];
     let over = ui.hovered(cell);
@@ -287,6 +325,9 @@ fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize
         }
         None => ui.placeholder(glyphs::ARTIST, portrait, true),
     }
+    if (over || selected) && card_button(ui, portrait, 0, glyphs::RADIO, app.vectors.is_some()) {
+        app.act(Action::Radio(crate::radio::Seed::Artist(artist.name.clone())));
+    }
     let mut y = portrait.bottom() + rem(0.25);
     for (style, text) in [(Style::Header, artist.name.clone()), (Style::Subtitle, count(artist.albums.len(), glyphs::ALBUM))] {
         let face = ui.face(style);
@@ -296,7 +337,7 @@ fn artist_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, i: usize
         y += face.line + rem(0.25);
     }
     if ui.click(cell) {
-        app.act(Action::Push(Page::Artist(ArtistPage::new(library, i))));
+        app.act(Action::OpenArtist(artist.name.clone()));
     }
     over
 }

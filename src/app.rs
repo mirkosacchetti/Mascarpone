@@ -18,8 +18,9 @@ use crate::glyphs;
 use crate::library::Library;
 use crate::master::{self, Master, Source};
 use crate::mpd::{Command, Event, Now};
-use crate::pages::{self, ArtistPage, Tracks};
+use crate::pages::{self, ArtistPage, Plays, Tracks};
 use crate::picker::{self, Kind, Modal};
+use crate::radio::{self, Job, Relations, Seed, Vectors};
 use crate::rl::{self, Input};
 use crate::ui::{Scroll, Ui};
 
@@ -88,17 +89,20 @@ pub enum Page {
     Artist(ArtistPage),
 }
 
-/// What a frame asks, done after it.
-#[allow(clippy::large_enum_variant)]
+/// What a frame asks, done after it. A page is asked by what it is
+/// (an album's key, an artist's name, a playlist's file), never by an
+/// index: it is found in the library as it is now, and the one already
+/// up is not opened again over itself.
 pub enum Action {
     /// Back to the root page, on the tab, its content dealt again.
     Tab(Tab),
-    Push(Page),
     /// An artist's page, unless it is the one up.
     OpenArtist(String),
-    /// An album's page from the library as it is now, the track selected.
-    OpenAlbum { album: usize, track: usize },
+    /// An album's page with the track selected; on the album's own page,
+    /// the track selected there.
+    OpenAlbum { key: String, track: usize },
     OpenPlaylist(PathBuf),
+    /// Back a page; the queue shown over a tab, hidden again.
     Back,
     Load { source: Source, uris: Vec<String>, start: usize },
     Append(Vec<String>),
@@ -119,6 +123,8 @@ pub enum Action {
     OpenUrl(String),
     Zoom(i32),
     Refresh,
+    /// The radio started from here.
+    Radio(Seed),
 }
 
 /// The song's clock between two statuses: the moment the status came,
@@ -133,6 +139,15 @@ pub struct Clock {
 pub struct App {
     pub commands: UnboundedSender<Command>,
     events: Receiver<Event>,
+    /// The radio thread's end: every library goes to it.
+    radio: std::sync::mpsc::Sender<Job>,
+    /// The tracks' analyses and the artists' links, as the radio thread
+    /// last sent them.
+    pub vectors: Option<Arc<Vectors>>,
+    pub relations: Option<Arc<Relations>>,
+    /// The analysis and the links going: done, of how many.
+    pub analyzing: Option<(usize, usize)>,
+    pub linking: Option<(usize, usize)>,
     /// Taken off the channel before a wait, for the next frame.
     early: Vec<Event>,
     pub pictures: Pictures,
@@ -173,11 +188,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(commands: UnboundedSender<Command>, events: Receiver<Event>) -> App {
+    pub fn new(commands: UnboundedSender<Command>, events: Receiver<Event>, radio: std::sync::mpsc::Sender<Job>) -> App {
         App {
             pictures: Pictures::new(commands.clone()),
             commands,
             events,
+            radio,
+            vectors: None,
+            relations: None,
+            analyzing: None,
+            linking: None,
             early: Vec::new(),
             library: None,
             now: None,
@@ -232,6 +252,30 @@ impl App {
         !self.early.is_empty() || self.pictures.news() || !self.actions.borrow().is_empty() || self.present
     }
 
+    /// A line from another launch, over the socket: `tab albums`,
+    /// `tab artists`, `tab playlists`, `tab queue`; `artist <name>`;
+    /// `album <key>` (artist, a unit separator, title); `search` (the
+    /// picker on everything); `escape` (a dialog closed, else back a
+    /// page). Anything else is said on stderr.
+    pub fn ask(&mut self, line: &str) {
+        let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match (word, rest) {
+            ("tab", "albums") => self.act(Action::Tab(Tab::Albums)),
+            ("tab", "artists") => self.act(Action::Tab(Tab::Artists)),
+            ("tab", "playlists") => self.act(Action::Tab(Tab::Playlists)),
+            ("tab", "queue") => self.act(Action::Tab(Tab::Queue)),
+            ("artist", name) if !name.is_empty() => self.act(Action::OpenArtist(name.to_owned())),
+            ("album", key) if !key.is_empty() => self.act(Action::OpenAlbum { key: key.to_owned(), track: 0 }),
+            ("search", "") => self.act(Action::Picker(Kind::All)),
+            ("escape", "") => {
+                if self.modal.take().is_none() {
+                    self.act(Action::Back);
+                }
+            }
+            _ => eprintln!("asked: {line}: not understood"),
+        }
+    }
+
     /// A word under the tabs, for a while or until the next one.
     pub fn notice(&mut self, text: String, for_: Option<Duration>) {
         self.snack = Some((text, for_.map(|d| Instant::now() + d)));
@@ -282,6 +326,7 @@ impl App {
                 }
                 self.now = Some(*now);
                 self.set_clock();
+                self.radio_tick();
             }
             Event::Library(library) => {
                 let totals = [
@@ -296,9 +341,12 @@ impl App {
                 if self.library.is_some() {
                     self.notice(totals, Some(Duration::from_secs(4)));
                 }
+                let _ = self.radio.send(Job::Library(library.clone()));
                 self.library = Some(library);
-                // the tab on screen dealt again; the others when shown
+                // the tab on screen dealt again; the others when shown;
+                // the pages up opened again on the new library
                 self.load_tab();
+                self.refresh_pages();
                 self.set_clock();
             }
             Event::Cover { key, path, failed } => self.pictures.cover_arrived(&key, path.as_deref(), failed),
@@ -314,12 +362,26 @@ impl App {
                 // stopped, the track waiting may be another
                 self.set_clock();
                 self.queue = None;
+                self.radio_tick();
             }
+            Event::Vectors(vectors) => {
+                self.vectors = Some(vectors);
+                self.radio_tick();
+            }
+            Event::Relations(relations) => self.relations = Some(relations),
+            Event::Analyzing { done, total } => {
+                if done >= total && self.analyzing.is_some() {
+                    self.notice(format!("{}  {}", glyphs::RADIO, pages::count(total, glyphs::TRACK)), Some(Duration::from_secs(4)));
+                }
+                self.analyzing = (done < total).then_some((done, total));
+            }
+            Event::Linking { done, total } => self.linking = (done < total).then_some((done, total)),
             Event::Playlists(list) => {
                 if let Some(library) = &self.library {
                     for p in &list {
                         ui.fonts.learn(&p.name);
                     }
+                    let _ = self.radio.send(Job::Playlists(list.clone()));
                     library.set_playlists(list);
                 }
             }
@@ -383,6 +445,20 @@ impl App {
         }
     }
 
+    /// The pages up (and those under the queue) opened again on the
+    /// library as it is now, each in its place; a page of something
+    /// gone closes.
+    fn refresh_pages(&mut self) {
+        let Some(library) = self.library.clone() else { return };
+        let reopen = |pages: &mut Vec<Page>| {
+            *pages = std::mem::take(pages).iter().filter_map(|p| reopen(p, &library)).collect();
+        };
+        reopen(&mut self.pages);
+        if let Some((_, pages)) = &mut self.under_queue {
+            reopen(pages);
+        }
+    }
+
     /// The tab shown, back on the root page, its content built again.
     pub fn show_tab(&mut self, tab: Tab) {
         self.under_queue = None;
@@ -439,7 +515,8 @@ impl App {
         }
     }
 
-    /// The queue saved as a playlist file, which the master then points to.
+    /// The queue saved as a playlist file, which the master then points
+    /// to; the radio's queue is only copied, and the radio goes on.
     pub fn save_queue_as(&mut self, name: &str) {
         let path = master::path_for(name);
         let uris = self.master.uris.clone();
@@ -447,13 +524,26 @@ impl App {
             eprintln!("{}: {e}", path.display());
             return;
         }
-        self.master.point(Source::Playlist { path }, uris);
-        self.queue = None;
+        // where it came from, on its row in the database: what, and
+        // its address
+        let (origin, url) = match &self.master.source {
+            Source::Radio { seed: Seed::Track(uri) } => ("radio:track", Some(uri.clone())),
+            Source::Radio { seed: Seed::Album(key) } => ("radio:album", Some(key.clone())),
+            Source::Radio { seed: Seed::Artist(artist) } => ("radio:artist", Some(artist.clone())),
+            _ => ("queue", None),
+        };
+        let _ = self.radio.send(Job::Origin { path: path.clone(), name: name.to_owned(), origin: origin.to_owned(), url });
+        if matches!(self.master.source, Source::Radio { .. }) {
+            self.notice(format!("{}  {name}", glyphs::PLAYLIST), Some(Duration::from_secs(4)));
+        } else {
+            self.master.point(Source::Playlist { path }, uris);
+            self.queue = None;
+        }
         self.send(Command::ReloadPlaylists);
     }
 
     /// A playlist deleted (see master::delete_playlist): its page closes,
-    /// and a queue it was the origin of stays as it is, the Anon Playlist.
+    /// and a queue it was the origin of stays as it is, put together by hand.
     fn delete(&mut self, path: &Path) {
         if let Err(e) = master::delete_playlist(path) {
             eprintln!("{}: {e}", path.display());
@@ -556,9 +646,15 @@ impl App {
             S::Repeat => self.send(if now.is_some_and(|(r, single)| r && !single) { Command::RepeatOff } else { Command::RepeatAll }),
             S::RepeatOne => self.send(if now.is_some_and(|(r, single)| r && single) { Command::RepeatOff } else { Command::RepeatOne }),
             S::GoToPlaying => crate::player::open_source(self),
+            S::Radio => {
+                if let Some(seed) = self.seed_here() {
+                    self.act(Action::Radio(seed));
+                }
+            }
             S::SaveQueue => {
                 if !self.master.uris.is_empty() {
-                    self.act(Action::Modal(Modal::name()));
+                    let proposed = self.library.as_ref().and_then(|l| self.master.radio_name(l));
+                    self.act(Action::Modal(Modal::name(proposed)));
                 }
             }
             S::ClearQueue => {
@@ -573,6 +669,70 @@ impl App {
             // a page's own keys, and the picker's
             _ => {}
         }
+    }
+
+    /// Where a radio would start from here: the selected row's track on
+    /// a tracks page or the queue's tab, the artist of their page, the
+    /// selected card's album or artist on their tabs.
+    fn seed_here(&self) -> Option<Seed> {
+        let library = self.library.as_ref()?;
+        match self.pages.last() {
+            Some(Page::Album(t) | Page::Playlist(t)) => t.selected_uri().map(Seed::Track),
+            Some(Page::Artist(a)) => Some(Seed::Artist(a.library.artists[a.index].name.clone())),
+            None => match self.tab {
+                Tab::Queue => self.queue.as_ref().and_then(|q| q.selected_uri()).map(Seed::Track),
+                Tab::Albums => self.albums.order.get(self.albums.selected).and_then(|&i| library.albums.get(i)).map(|a| Seed::Album(a.key.clone())),
+                Tab::Artists => self.artists.order.get(self.artists.selected).and_then(|&i| library.artists.get(i)).map(|a| Seed::Artist(a.name.clone())),
+                Tab::Playlists => None,
+            },
+        }
+    }
+
+    /// The radio started: what opens it (the track, twenty of the
+    /// artist's; nothing for an album), then the first twenty of the
+    /// path, loaded on the queue and played; the master points to the
+    /// radio. Said under the tabs when nothing can be chosen yet.
+    fn start_radio(&mut self, seed: Seed) {
+        let Some(library) = self.library.clone() else { return };
+        let mut uris = radio::opening(&library, &seed);
+        let empty = Vectors::default();
+        let no_links = Relations::default();
+        let vectors = self.vectors.as_deref().unwrap_or(&empty);
+        let relations = self.relations.as_deref().unwrap_or(&no_links);
+        let more = radio::path(&library, vectors, relations, &seed, &uris, radio::STEP);
+        uris.extend(more);
+        if uris.is_empty() {
+            self.notice(format!("{}  {}", glyphs::RADIO, glyphs::NOTHING), Some(Duration::from_secs(4)));
+            return;
+        }
+        self.send(Command::Random(false));
+        self.send(Command::Play { uris: uris.clone(), start: 0 });
+        self.master.point(Source::Radio { seed }, uris);
+        self.queue = None;
+    }
+
+    /// The radio's queue kept ahead: fewer than five tracks left after
+    /// the song on, twenty more; while it plays or pauses, not when it
+    /// has been stopped.
+    fn radio_tick(&mut self) {
+        let Source::Radio { seed } = &self.master.source else { return };
+        let (Some(library), Some(now), Some(vectors)) = (&self.library, &self.now, &self.vectors) else { return };
+        if now.status.state == mpd_client::responses::PlayState::Stopped {
+            return;
+        }
+        let Some((pos, _)) = now.status.current_song else { return };
+        let left = self.master.uris.len().saturating_sub(pos.0 + 1);
+        if left >= radio::LOW {
+            return;
+        }
+        let no_links = Relations::default();
+        let relations = self.relations.as_deref().unwrap_or(&no_links);
+        let more = radio::path(library, vectors, relations, seed, &self.master.uris, radio::STEP);
+        if more.is_empty() {
+            return;
+        }
+        self.master.grow(&more);
+        self.send(Command::Queue { uris: more });
     }
 
     /// What Ctrl+F searches: a tracks page its rows, an artist's page
@@ -601,7 +761,7 @@ impl App {
             Some(Page::Artist(a)) => {
                 if !a.grid.step(input) && enter {
                     if let Some(&album) = a.grid.order.get(a.grid.selected) {
-                        self.act(Action::Push(Page::Album(Tracks::album(&a.library, album, 0))));
+                        self.act(Action::OpenAlbum { key: a.library.albums[album].key.clone(), track: 0 });
                     }
                 }
             }
@@ -632,10 +792,11 @@ impl App {
             return;
         }
         let Some(&i) = grid.order.get(grid.selected) else { return };
+        let Some(library) = library else { return };
         let action = match self.tab {
-            Tab::Albums => Some(Action::OpenAlbum { album: i, track: 0 }),
-            Tab::Artists => library.map(|l| Action::Push(Page::Artist(ArtistPage::new(&l, i)))),
-            _ => library.and_then(|l| l.playlists().get(i).map(|p| Action::OpenPlaylist(p.path.clone()))),
+            Tab::Albums => library.albums.get(i).map(|a| Action::OpenAlbum { key: a.key.clone(), track: 0 }),
+            Tab::Artists => library.artists.get(i).map(|a| Action::OpenArtist(a.name.clone())),
+            _ => library.playlists().get(i).map(|p| Action::OpenPlaylist(p.path.clone())),
         };
         if let Some(action) = action {
             self.act(action);
@@ -655,30 +816,39 @@ impl App {
     fn perform(&mut self, action: Action) {
         match action {
             Action::Tab(tab) => self.show_tab(tab),
-            Action::Push(page) => self.pages.push(page),
             Action::OpenArtist(name) => {
                 let Some(library) = self.library.clone() else { return };
                 let Some(index) = library.artist(&name) else { return };
-                if !matches!(self.pages.last(), Some(Page::Artist(a)) if a.index == index && Arc::ptr_eq(&a.library, &library)) {
+                if !matches!(self.pages.last(), Some(Page::Artist(a)) if a.name() == name) {
                     self.pages.push(Page::Artist(ArtistPage::new(&library, index)));
                 }
             }
-            Action::OpenAlbum { album, track } => {
-                if let Some(library) = self.library.clone() {
-                    if album < library.albums.len() {
-                        self.pages.push(Page::Album(Tracks::album(&library, album, track)));
+            Action::OpenAlbum { key, track } => {
+                let Some(library) = self.library.clone() else { return };
+                if let Some(Page::Album(t)) = self.pages.last_mut() {
+                    if t.plays == Plays::Load(Source::Album { key: key.clone() }) {
+                        t.select(track);
+                        return;
                     }
+                }
+                if let Some(album) = library.album_index(&key) {
+                    self.pages.push(Page::Album(Tracks::album(&library, album, track)));
                 }
             }
             Action::OpenPlaylist(path) => {
                 let Some(library) = self.library.clone() else { return };
+                if matches!(self.pages.last(), Some(Page::Playlist(t)) if t.plays == Plays::Load(Source::Playlist { path: path.clone() })) {
+                    return;
+                }
                 let page = library.playlists().iter().find(|p| p.path == path).map(|p| Tracks::playlist(&library, p));
                 if let Some(page) = page {
                     self.pages.push(Page::Playlist(page));
                 }
             }
             Action::Back => {
-                self.pages.pop();
+                if self.pages.pop().is_none() && self.tab == Tab::Queue && self.under_queue.is_some() {
+                    self.toggle_queue();
+                }
             }
             Action::Load { source, uris, start } => self.load(source, uris, start),
             Action::Append(uris) => self.append(uris),
@@ -706,6 +876,20 @@ impl App {
                 if self.master.source == (Source::Playlist { path }) {
                     self.send(Command::Random(on));
                 }
+                // the database's playlists written again, with the flag
+                if let Some(library) = &self.library {
+                    let _ = self.radio.send(Job::Playlists(library.playlists().clone()));
+                }
+            }
+            // a seek shows at once: the clock set to the point asked,
+            // until mpd's status confirms it (a frame or two later, which
+            // showed the old point in between)
+            Action::Mpd(Command::Seek(to)) => {
+                if let Some(clock) = &mut self.clock {
+                    clock.elapsed = to.min(clock.length);
+                    clock.since = Instant::now();
+                }
+                self.send(Command::Seek(to));
             }
             Action::Mpd(c) => self.send(c),
             Action::Picker(kind) => {
@@ -731,6 +915,38 @@ impl App {
                 self.notice(format!("{}  MPD", glyphs::REFRESH), None);
                 self.send(Command::Refresh);
             }
+            Action::Radio(seed) => self.start_radio(seed),
+        }
+    }
+}
+
+/// A page opened again on another library, in its place: the selected
+/// row or album, the scroll; none when what it showed is gone.
+fn reopen(page: &Page, library: &Arc<Library>) -> Option<Page> {
+    match page {
+        Page::Album(t) => {
+            let Plays::Load(Source::Album { key }) = &t.plays else { return None };
+            let mut new = Tracks::album(library, library.album_index(key)?, t.selected.unwrap_or(0));
+            new.scroll = t.scroll;
+            new.reveal = false;
+            Some(Page::Album(new))
+        }
+        Page::Playlist(t) => {
+            let Plays::Load(Source::Playlist { path }) = &t.plays else { return None };
+            let playlists = library.playlists();
+            let mut new = Tracks::playlist(library, playlists.iter().find(|p| p.path == *path)?);
+            new.selected = t.selected.filter(|&i| new.rows.get(i).is_some_and(|r| r.start.is_some()));
+            new.scroll = t.scroll;
+            new.reveal = false;
+            Some(Page::Playlist(new))
+        }
+        Page::Artist(a) => {
+            let mut new = ArtistPage::new(library, library.artist(a.name())?);
+            new.grid.selected = a.grid.selected.min(new.grid.order.len().saturating_sub(1));
+            new.grid.scroll = a.grid.scroll;
+            new.grid.reveal = false;
+            new.words = a.words;
+            Some(Page::Artist(new))
         }
     }
 }
