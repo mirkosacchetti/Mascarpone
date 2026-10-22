@@ -71,19 +71,21 @@ struct Heard {
 
 /// The voice models, loaded (and optimized by tract, half a second of
 /// CPU) the first time a voice is to be heard; None when they failed.
-fn models(models: &OnceLock<Option<Models>>) -> Option<&Models> {
+/// A thread's own models, loaded once; whether they load is noted
+/// for all, so a library without them is not heard for a voice.
+fn models(loads: &OnceLock<bool>) -> Option<Models> {
+    let models = match Models::load() {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("archive: the voice models: {e}: no voice heard");
+            None
+        }
+    };
+    loads.get_or_init(|| models.is_some());
     models
-        .get_or_init(|| match Models::load() {
-            Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!("archive: the voice models: {e}: no voice heard");
-                None
-            }
-        })
-        .as_ref()
 }
 
-fn hear(models: &OnceLock<Option<Models>>, t: &Todo) -> Heard {
+fn hear(models: Option<&mut Models>, t: &Todo) -> Heard {
     let pre = match <SymphoniaDecoder as Decoder>::decode(&t.path) {
         Ok(pre) => pre,
         Err(e) => {
@@ -91,7 +93,7 @@ fn hear(models: &OnceLock<Option<Models>>, t: &Todo) -> Heard {
             return Heard { bliss: t.bliss.then(|| Err(e.clone())), voice: t.voice.then_some(Err(e)) };
         }
     };
-    let voice = if t.voice { self::models(models).map(|m| m.hear(&pre.sample_array, 22050).map_err(|e| e.to_string())) } else { None };
+    let voice = if t.voice { models.map(|m| m.hear(&pre.sample_array, 22050).map_err(|e| e.to_string())) } else { None };
     let bliss = t.bliss.then(|| {
         Song::analyze_series(&pre.sample_array).map_err(|e| e.to_string()).map(|(analysis, series)| {
             let mut v = [0f32; N];
@@ -110,7 +112,7 @@ struct Archive {
     artists: HashMap<String, Option<String>>,
     library: Option<Arc<Library>>,
     linking: (usize, usize),
-    models: Arc<OnceLock<Option<Models>>>,
+    models: Arc<OnceLock<bool>>,
     started: Instant,
 }
 
@@ -180,9 +182,10 @@ impl Archive {
                     .name("bliss".into())
                     .spawn(move || {
                         lowest_priority();
+                        let mut models = self::models(&models);
                         loop {
                             let Some(t) = work.lock().unwrap().pop() else { break };
-                            let heard = hear(&models, &t);
+                            let heard = hear(models.as_mut(), &t);
                             if done_tx.send((t, heard)).is_err() {
                                 break;
                             }
@@ -230,7 +233,7 @@ impl Archive {
         let music = crate::library::music_dir();
         let mut todo: Vec<Todo> = Vec::new();
         let mut present: HashSet<&str> = HashSet::new();
-        let hearing = self.models.get().is_none_or(|m| m.is_some());
+        let hearing = self.models.get().is_none_or(|&loads| loads);
         for (a, album) in library.albums.iter().enumerate() {
             for (t, track) in album.tracks.iter().enumerate() {
                 present.insert(&track.uri);
