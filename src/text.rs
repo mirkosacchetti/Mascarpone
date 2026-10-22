@@ -80,8 +80,15 @@ impl Face {
         let Some((_, r)) = self.glyph(c) else { return };
         let pad = self.font.glyphPadding as f32;
         let src = Rectangle { x: r.x - pad, y: r.y - pad, width: r.width + 2.0 * pad, height: r.height + 2.0 * pad };
-        let dst = Rectangle { x: (center.x - r.width / 2.0).round() - pad, y: (center.y - r.height / 2.0).round() - pad, width: src.width, height: src.height };
-        unsafe { rl::DrawTexturePro(self.font.texture, src, dst, Vector2::default(), 0.0, color) };
+        let turn = crate::glyphs::turn(glyph);
+        if turn == 0.0 {
+            let dst = Rectangle { x: (center.x - r.width / 2.0).round() - pad, y: (center.y - r.height / 2.0).round() - pad, width: src.width, height: src.height };
+            unsafe { rl::DrawTexturePro(self.font.texture, src, dst, Vector2::default(), 0.0, color) };
+        } else {
+            // turned about its centre: the origin is the destination's middle, which then sits at the centre
+            let dst = Rectangle { x: center.x.round(), y: center.y.round(), width: src.width, height: src.height };
+            unsafe { rl::DrawTexturePro(self.font.texture, src, dst, Vector2 { x: src.width / 2.0, y: src.height / 2.0 }, turn, color) };
+        }
     }
 
     pub fn ellipsize<'a>(&self, s: &'a str, max: f32) -> std::borrow::Cow<'a, str> {

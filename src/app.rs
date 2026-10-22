@@ -416,7 +416,16 @@ impl App {
         self.load_tab();
     }
 
+    /// Repeating one song ends with the queue it was set on: a new or
+    /// grown queue puts the repeat off.
+    fn unrepeat_one(&mut self) {
+        if self.now.as_ref().is_some_and(|n| n.status.single == mpd_client::commands::SingleMode::Enabled) {
+            self.send(Command::RepeatOff);
+        }
+    }
+
     pub fn load(&mut self, source: Source, uris: Vec<String>, start: usize) {
+        self.unrepeat_one();
         let random = match &source {
             Source::Playlist { path } => master::shuffled(path),
             _ => false,
@@ -428,6 +437,7 @@ impl App {
     }
 
     pub fn append(&mut self, uris: Vec<String>) {
+        self.unrepeat_one();
         self.master.append(&uris);
         self.send(Command::Queue { uris });
     }
@@ -628,6 +638,7 @@ impl App {
             self.notice(format!("{}  {}", glyphs::RADIO, glyphs::NOTHING), Some(Duration::from_secs(4)));
             return;
         }
+        self.unrepeat_one();
         self.send(Command::Random(false));
         self.send(Command::Play { uris: uris.clone(), start: 0 });
         self.master.point(Source::Radio { seed }, uris);

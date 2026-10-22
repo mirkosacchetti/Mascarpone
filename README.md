@@ -22,7 +22,7 @@ for an album, with the folder's name.
 | | |
 |---|---|
 | ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
-| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, an album of Pulp playing, the song on marked, a radio key on every row](docs/queue.webp) |
+| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, a radio from Calibro 35's first album on, the song playing marked, a radio key on every row](docs/queue.webp) |
 | ![The picker on everything](docs/picker.webp) | ![The commands' picker, every action with its keys](docs/commands.webp) |
 
 ## Build

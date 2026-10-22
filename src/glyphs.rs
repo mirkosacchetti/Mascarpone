@@ -10,7 +10,7 @@ pub const REPEAT: &str = "\u{f0456}";
 pub const REPEAT_ONE: &str = "\u{f0458}";
 pub const PREVIOUS: &str = "\u{f04ae}";
 pub const NEXT: &str = "\u{f04ad}";
-pub const PLAY: &str = "\u{f040a}";
+pub const PLAY: &str = "\u{f04a5}";
 pub const PAUSE: &str = "\u{f03e4}";
 pub const SAVE: &str = "\u{f0193}";
 pub const CLEAR: &str = "\u{f0413}";
@@ -30,6 +30,11 @@ pub const CONNECTED: &str = "\u{f0318}";
 pub const DISCONNECTED: &str = "\u{f0319}";
 pub const REFRESH: &str = "\u{f05c2}";
 pub const COMMAND: &str = "\u{f030c}";
-pub const RADIO: &str = "\u{f043c}";
+pub const RADIO: &str = "\u{f0439}";
+
+/// Degrees a glyph is turned when drawn: the spoon stands, bowl up.
+pub fn turn(glyph: &str) -> f32 {
+    if glyph == PLAY { -45.0 } else { 0.0 }
+}
 
 pub const ALL: &[&str] = &[APP, ALBUM, TRACK, ARTIST, PLAYLIST, QUEUE, ADD, QUEUE_ADD, REPEAT, REPEAT_ONE, PREVIOUS, NEXT, PLAY, PAUSE, SAVE, CLEAR, UP, DOWN, REMOVE, SHUFFLE, DELETE, MISSING, YEAR, LENGTH, RETRY, WIKIPEDIA, NOTHING, FOLDER, CONNECTED, DISCONNECTED, REFRESH, COMMAND, RADIO];

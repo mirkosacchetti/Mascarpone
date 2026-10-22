@@ -248,10 +248,10 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
     }
 
     if over || selected {
-        if card_button(ui, cover, 1, glyphs::PLAY, true) {
+        if card_button(ui, cover, 0, glyphs::PLAY, true) {
             app.act(Action::Load { source: Source::Album { key: album.key.clone() }, uris: album.uris(), start: 0 });
         }
-        if card_button(ui, cover, 0, glyphs::RADIO, app.vectors.is_some()) {
+        if card_button(ui, cover, 1, glyphs::RADIO, app.vectors.is_some()) {
             app.act(Action::Radio(crate::radio::Seed::Album(album.key.clone())));
         }
     }
