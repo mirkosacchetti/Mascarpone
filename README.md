@@ -36,7 +36,9 @@ own Makefile): it wants `make`, a C compiler and `wayland-scanner`.
 bliss (bliss-audio 0.13, the song analysis for the radio) is in
 `vendor/bliss-rs`, built with its symphonia decoder and no ffmpeg,
 with one addition, `Song::analyze_series`, the analysis that keeps
-also what the descriptors saw window by window, for the shape; it
+also what the descriptors saw window by window, for the shape, and
+symphonia's ID3v2 reader turned on, without which a UTF-16 tag's
+bytes can pass for an MPEG layer 1 sync and the file is refused; it
 is GPL-3 (its `LICENSE` is there), which a Mascarpone built with it is
 distributed under. SQLite comes with rusqlite, built in. The voice
 models are built in too, run by tract (ONNX, in Rust): YAMNet in

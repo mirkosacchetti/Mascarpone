@@ -90,6 +90,7 @@ symphonia = [
     "analysis",
     "_any_decoder",
     "dep:symphonia",
+    "symphonia/id3v2",
     "dep:rubato",
     "dep:audioadapter-buffers",
 ]
