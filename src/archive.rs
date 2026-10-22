@@ -349,10 +349,11 @@ fn lowest_priority() {
     }
 }
 
-/// macOS: the thread in the background class, below every other.
+/// macOS: the thread in the utility class, under the window's; not the
+/// background class, which keeps a thread on the efficiency cores only.
 #[cfg(target_os = "macos")]
 fn lowest_priority() {
     unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
 }

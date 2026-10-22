@@ -74,7 +74,7 @@ key left out keeps its default, one not known is said on stderr.
     playlists = ~/Music/Playlists
 
     [radio]
-    threads = 4             # files analyzed at a time: a quarter of the cores
+    threads = 8             # files analyzed at a time: half the cores
     crossfade = 1           # seconds, between a radio's tracks only
 
     [keys]
@@ -279,7 +279,7 @@ from a few dozen known tracks and `cargo test --release
 shape::tests::probe -- --ignored --nocapture` with `SHAPE_FILES`
 prints the shape of any files, raw and bounded, to see them against
 more. The analysis runs on the archive's thread at the lowest priority
-(`[radio] threads` files at a time, a quarter of the cores by default,
+(`[radio] threads` files at a time, half the cores by default,
 the first time a few seconds after the window opens) after every load
 of the library, on the files new or changed since (by their
 modification time and size); it shows in the header, on the right, as
