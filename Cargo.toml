@@ -19,7 +19,7 @@ libc = "0.2"
 fastrand = "2"
 bliss-audio = { path = "vendor/bliss-rs", default-features = false, features = ["symphonia-all"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-tract-onnx = "0.21"
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
 
 [profile.release]
 opt-level = 2
