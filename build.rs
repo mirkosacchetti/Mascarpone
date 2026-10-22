@@ -47,10 +47,21 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", src.display());
     println!("cargo:rustc-link-lib=static=raylib");
+    if macos() {
+        for framework in ["OpenGL", "Cocoa", "IOKit", "CoreVideo", "QuartzCore"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        return;
+    }
     // GLFW opens Wayland, X11 and EGL itself, at run time
     for lib in ["GL", "m", "dl", "pthread", "rt"] {
         println!("cargo:rustc-link-lib={lib}");
     }
+}
+
+/// Built for macOS: GLFW on Cocoa, the system's frameworks.
+fn macos() -> bool {
+    std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos")
 }
 
 /// `target/raylib`: `OUT_DIR` is `<target>/<profile>/build/<crate>/out`.
@@ -89,7 +100,11 @@ fn walk(path: &Path, f: &mut impl FnMut(&Path)) {
 /// source and its stops kept where GLFW reads Wayland's pointer.
 fn patch(src: &Path) {
     patch_app_id(src);
-    patch_scroll(src);
+    if macos() {
+        patch_scroll_cocoa(src);
+    } else {
+        patch_scroll(src);
+    }
 }
 
 /// Replaces `from` once in a file, which must have it.
@@ -124,6 +139,19 @@ fn patch_scroll(src: &Path) {
     );
 }
 
+/// The same two globals from Cocoa's scroll: a trackpad's or a Magic
+/// Mouse's deltas are precise (pixels), a wheel's are not (notches); the
+/// fingers lifted end the scroll's phase, before the momentum's.
+fn patch_scroll_cocoa(src: &Path) {
+    let ns = src.join("external").join("glfw").join("src").join("cocoa_window.m");
+    replace(&ns, "@implementation GLFWContentView", "int mascarpone_scroll_continuous = 0;\nunsigned int mascarpone_scroll_stops = 0;\n\n@implementation GLFWContentView");
+    replace(
+        &ns,
+        "    if ([event hasPreciseScrollingDeltas])\n    {",
+        "    mascarpone_scroll_continuous = [event hasPreciseScrollingDeltas] ? 1 : 0;\n    if ([event phase] & NSEventPhaseEnded)\n        mascarpone_scroll_stops++;\n\n    if ([event hasPreciseScrollingDeltas])\n    {",
+    );
+}
+
 fn patch_app_id(src: &Path) {
     let hints = "glfwDefaultWindowHints();";
     replace(
@@ -137,10 +165,9 @@ fn make(src: &Path) {
     let status = Command::new("make")
         .current_dir(src)
         .arg(format!("-j{}", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)))
+        .args(if macos() { &[][..] } else { &["GLFW_LINUX_ENABLE_WAYLAND=TRUE", "GLFW_LINUX_ENABLE_X11=TRUE"][..] })
         .args([
             "PLATFORM=PLATFORM_DESKTOP_GLFW",
-            "GLFW_LINUX_ENABLE_WAYLAND=TRUE",
-            "GLFW_LINUX_ENABLE_X11=TRUE",
             "RAYLIB_MODULE_AUDIO=FALSE",
             "RAYLIB_MODULE_MODELS=FALSE",
             "RAYLIB_LIBTYPE=STATIC",

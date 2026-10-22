@@ -14,6 +14,13 @@ distribution, X11 or another compositor may well work (GLFW opens what
 it finds) but nothing has been tried there. The window's app id is
 `cards.random.Mascarpone`, for a compositor's rules.
 
+It builds and links on macOS too (Apple silicon, GLFW on Cocoa, the
+system's OpenGL): mpd from Homebrew (`brew install mpd`, a `~/.mpdconf`
+with an `osx` output, `brew services start mpd`), the font found by
+Homebrew's `fc-match`; `music` and `playlists` in the configuration where
+mpd's music is. There is no bar there to see what plays (no MPRIS), and
+the window opens only from the desktop's session, the screen unlocked.
+
 A track without an album tag is filed under its folder, which stands in
 for an album, with the folder's name.
 

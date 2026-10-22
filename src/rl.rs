@@ -166,6 +166,7 @@ extern "C" {
     fn glfwInitHint(hint: c_int, value: c_int);
     fn glfwGetCurrentContext() -> *mut c_void;
     fn glfwGetPlatform() -> c_int;
+    #[cfg(target_os = "linux")]
     fn glfwGetWaylandWindow(window: *mut c_void) -> *mut c_void;
     fn glfwWaitEventsTimeout(timeout: f64);
     fn glfwPostEmptyEvent();
@@ -284,6 +285,7 @@ pub fn open(width: i32, height: i32, title: &str) {
             scroll: glfwSetScrollCallback(window, Some(on_scroll)),
             close: glfwSetWindowCloseCallback(window, Some(on_close)),
         };
+        #[cfg(target_os = "linux")]
         if glfwGetPlatform() == GLFW_PLATFORM_WAYLAND {
             WAYLAND.with(|w| *w.borrow_mut() = Wayland::new(glfwGetWaylandWindow(window)));
         }
