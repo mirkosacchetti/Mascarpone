@@ -26,6 +26,7 @@ pub enum Command {
     Forward(Duration),
     Backward(Duration),
     Random(bool),
+    Crossfade(Duration),
     Play { uris: Vec<String>, start: usize },
     PlayPos(usize),
     Remove(usize),
@@ -412,6 +413,7 @@ async fn perform(client: &Client, command: Command) -> Result<()> {
         Command::Move { from, to } => client.command(cmd::Move::position(SongPosition(from)).to_position(SongPosition(to))).await?,
         Command::Clear => client.command(cmd::ClearQueue).await?,
         Command::Random(on) => client.command(cmd::SetRandom(on)).await?,
+        Command::Crossfade(seconds) => client.command(cmd::Crossfade(seconds)).await?,
         Command::Seek(to) => client.command(cmd::Seek(cmd::SeekMode::Absolute(to))).await?,
         Command::ReloadPlaylists | Command::Refresh | Command::Cover { .. } | Command::Artist(_) | Command::ForgetArtist(_) | Command::Links(_) => unreachable!("handled in session"),
     }

@@ -136,6 +136,8 @@ pub struct App {
     pub shown_at: Instant,
     /// The grids are dealt anew with the next library: asked by Refresh.
     redeal: bool,
+    /// mpd's crossfade before a radio set its own, to put back when the radio ends.
+    fade_before: Option<Duration>,
     pub pages: Vec<Page>,
     forward: Vec<Page>,
     under_queue: Option<(Tab, Vec<Page>)>,
@@ -172,6 +174,7 @@ impl App {
             playlists: Grid::default(),
             shown_at: Instant::now(),
             redeal: false,
+            fade_before: None,
             pages: Vec::new(),
             forward: Vec::new(),
             under_queue: None,
@@ -634,7 +637,31 @@ impl App {
         }
     }
 
+    /// A radio has its crossfade (`[radio] crossfade`), the queue
+    /// otherwise what mpd had before the radio.
+    fn fade_tick(&mut self) {
+        let Some(now) = &self.now else { return };
+        let wanted = crate::config::get().crossfade;
+        match (matches!(self.master.source, Source::Radio { .. }), self.fade_before) {
+            (true, None) => {
+                // a radio found already on at the start (the app restarted into it) has the fade set by this app
+                self.fade_before = Some(if now.status.crossfade == wanted { Duration::ZERO } else { now.status.crossfade });
+                if now.status.crossfade != wanted {
+                    self.send(Command::Crossfade(wanted));
+                }
+            }
+            (false, Some(before)) => {
+                self.fade_before = None;
+                if now.status.crossfade != before {
+                    self.send(Command::Crossfade(before));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn radio_tick(&mut self) {
+        self.fade_tick();
         let Source::Radio { seed } = &self.master.source else { return };
         let (Some(library), Some(now), Some(vectors)) = (&self.library, &self.now, &self.vectors) else { return };
         if now.status.state == mpd_client::responses::PlayState::Stopped {

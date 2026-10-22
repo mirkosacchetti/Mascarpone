@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::rl::{self, Input};
 
@@ -202,6 +203,8 @@ pub struct Config {
     pub music: PathBuf,
     pub playlists: PathBuf,
     pub threads: usize,
+    /// The crossfade between a radio's tracks; nothing for the queue otherwise.
+    pub crossfade: Duration,
     keys: HashMap<Shortcut, Vec<Chord>>,
     labels: HashMap<Shortcut, String>,
 }
@@ -268,6 +271,7 @@ fn load() -> Config {
     let playlists = take("library", "playlists").map(home).unwrap_or_else(|| music.join("Playlists"));
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = take("radio", "threads").and_then(|t| t.parse().ok()).filter(|&n| n > 0).unwrap_or((cores / 4).max(1));
+    let crossfade = Duration::from_secs(take("radio", "crossfade").and_then(|t| t.parse().ok()).unwrap_or(3));
 
     let mut keys = HashMap::new();
     let mut labels = HashMap::new();
@@ -292,7 +296,7 @@ fn load() -> Config {
     for (section, key) in values.keys() {
         eprintln!("{}: [{section}] {key}: not a setting", path.display());
     }
-    Config { host, port, password, music, playlists, threads, keys, labels }
+    Config { host, port, password, music, playlists, threads, crossfade, keys, labels }
 }
 
 fn strip_comment(line: &str) -> &str {
