@@ -328,41 +328,56 @@ forced in; an artist, fifteen of whose tracks open it at random, and
 whose tracks are all it plays. Then
 three arcs of fifteen tracks, and another arc as the first track of
 the last one starts, so that two whole arcs are always ahead: each
-arc from the seed, always from the seed (a track's vector,
-the mean of an album's or an artist's tracks) and never from what
-played last, three tracks a part, each part passing into the next over
-its three tracks, a third a track: the
+arc from the seed, always from the seed and never from what played
+last, three tracks a part, each part passing into the next over its
+three tracks, a third a track.
+
+A track is on eleven axes, the 33 measures (bliss's 23, the voice's
+two, the shape's eight) folded by what they measure together: zcr,
+centroid, rolloff and flatness move as one over the library (nine in
+ten), so do loudness's mean and deviation, the voice's two, the three
+of how chordal the sound is. Each axis is the mean of its measures'
+deviations from the library's mean, in the library's deviations,
+and then its rank: a percentile of the library, 0 the lowest, 1 the
+highest, a constant at a half. So a measure the library hardly spans
+weighs as much as one it spans whole, and a shift means the same on
+a skewed measure as on an even one. Five axes are the world's, what
+an album keeps to (over the library's albums, a track strays from
+its album half as far as from the library on them): the timbre
+(bright) and how it varies (texture), the loudness, the voice, the
+chordal. Six are the levers, what an album itself goes through: the
+tension (the minor second and the tritone, the minor, diminished
+and augmented triads, far off a key; the fifth and the major
+against), the motion (the chroma moving, many sections, little
+repetition), the drive (tempo and onsets), the steady pulse, the
+rise, the arch (`MEMBERS` in `src/radio.rs`).
+
+The seed is a point on the axes (a track's; the mean of an album's
+or an artist's tracks), and its world the tenth of the library
+nearest to it on the world's five, never fewer than 120 tracks (an
+artist's radio has their own tracks for a world). The arc is on the
+levers only: each part a shift of the seed, in percentiles (`ARC`;
+a track between two parts gets the two shifts in proportion): the
 equilibrium (the seed itself, no shift), the break (a first
-dissonance: the diminished and the minor up, the major down, a step
-off the key and the harmony moving; the timbre dirtied, flatness and
-crossings up; the loudness less steady, a dip; the pulse broken, the
-repetition too, a section's edge), the adventure (the longest unrest:
-far off the key and moving, diminished and augmented bridges, the
-timbre layered, more registers; loudness in waves, a crescendo;
-faster, denser, the pulse put to the test; the motif varied rather
-than repeated, many sections, more vocal), the climax (the densest
-and loudest, brightest, fullest; the tension sustained, far from the
-key but still, the diminished, a touch of the major for the victory;
-the fastest and thickest pulse, a motif hammered; an arch, a rise
-that resolves), the new equilibrium (home: on a key, the major up,
-the minor and diminished down; lighter and cleaner, quieter and
-steady, a fade; the pulse regular, sparse, slower; the repetition of
-the start, few sections, the harmony still; less vocal).
-Each part is a shift of the seed's vector along
-bliss's features, the voice's and the shape's (`ARC` in `src/radio.rs`; a track between two parts
-gets the two shifts in proportion), measured in standard
-deviations of each feature over the library, so that a feature the
-library hardly spans is shifted as gently as one it spans whole; its track is the
-nearest to that shift, one of the six nearest, the nearer the likelier
-(by the square of the rank: the nearest four times in ten, the second
-three, the sixth once in ninety),
-never one already in the queue, never one longer than a quarter of an
-hour (a whole side, a live set). The artists have no say in it: the
-track's analysis alone decides. The distance is over bliss's 23 features, the two of the
-voice and the eight of the shape, each in -1..1: a song and an
-instrumental are far apart however alike they sound otherwise, a
-crescendo and a fade too; a track not shaped yet (an older version)
-sits at zero on every shape, halfway from all. And the voice is a ceiling:
+dissonance and the harmony moving, the pulse broken, the repetition
+too, a dip), the adventure (the longest unrest: far off the key and
+moving, through-composed, a crescendo, faster and denser, the pulse
+put to the test), the climax (the tension sustained, the fastest and
+thickest pulse, a motif hammered, an arch that resolves), the new
+equilibrium (home: on a key, the repetition of the start, slower and
+sparser, steady, a fade). Each track of the arc costs the sum of
+four terms, each 0 to 1: its miss of the part's target on the
+levers; half its distance from the seed on the world's axes; half
+its distance from the track before on the glue's (bright, loud,
+drive), so that one track passes into the next; and a third if its
+author was heard among the last three. The track is one of the six
+cheapest, the cheaper the likelier (by the square of the rank: the
+cheapest four times in ten, the second three, the sixth once in
+ninety), never one already in the queue, never one longer than a
+quarter of an hour (a whole side, a live set). The artists have no
+say in it beyond their turn: the track's analysis decides. A track
+not shaped yet (an older version) sits at zero on every shape, in
+the rank where zero falls. And the voice is a ceiling:
 no track more vocal than where the radio started (a track's voice; the
 most vocal track of an album or an artist), so a radio from an
 instrumental plays instrumentals only, one from a song anything; a
@@ -421,8 +436,9 @@ the queue as well.
   written down as it loads, the analysis (bliss on the files, the voice
   heard), the artists' links asked of the net, the vectors sent to
   the app.
-- `src/radio.rs`: what a track is measured by, the arc and the radio's
-  path through the library: functions, no thread.
+- `src/radio.rs`: what a track is measured by, the axes, the world
+  and the arc, the radio's path through the library: functions, no
+  thread.
 - `src/db.rs`: the SQLite database: tracks with their analysis, artists,
   relations, albums, playlists.
 - `src/voice.rs`: the voice heard in a track, YAMNet and Essentia's head
