@@ -6,7 +6,8 @@ build:
 	cargo build --release
 
 install: build
-	install -Dm755 target/release/mascarpone $(PREFIX)/bin/mascarpone
+	install -d $(PREFIX)/bin
+	install -m755 target/release/mascarpone $(PREFIX)/bin/mascarpone
 
 run:
 	cargo run

@@ -341,9 +341,18 @@ fn stamp_of(path: &std::path::Path) -> Option<Stamp> {
     Some(Stamp { mtime, size: meta.len() as i64 })
 }
 
+#[cfg(target_os = "linux")]
 fn lowest_priority() {
     unsafe {
         let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
         libc::setpriority(libc::PRIO_PROCESS, tid, 19);
+    }
+}
+
+/// macOS: the thread in the background class, below every other.
+#[cfg(target_os = "macos")]
+fn lowest_priority() {
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
     }
 }

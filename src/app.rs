@@ -828,7 +828,8 @@ impl App {
             Action::Retry(name) => self.pictures.retry(&name),
             Action::Run(shortcut) => self.run(shortcut),
             Action::OpenUrl(url) => {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                let open = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                let _ = std::process::Command::new(open).arg(url).spawn();
             }
             Action::Zoom(0) => crate::size::reset(),
             Action::Zoom(step) => crate::size::zoom(step),
