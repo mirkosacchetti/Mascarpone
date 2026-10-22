@@ -271,7 +271,7 @@ fn load() -> Config {
     let playlists = take("library", "playlists").map(home).unwrap_or_else(|| music.join("Playlists"));
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = take("radio", "threads").and_then(|t| t.parse().ok()).filter(|&n| n > 0).unwrap_or((cores / 4).max(1));
-    let crossfade = Duration::from_secs(take("radio", "crossfade").and_then(|t| t.parse().ok()).unwrap_or(3));
+    let crossfade = Duration::from_secs(take("radio", "crossfade").and_then(|t| t.parse().ok()).unwrap_or(1));
 
     let mut keys = HashMap::new();
     let mut labels = HashMap::new();

@@ -66,7 +66,7 @@ key left out keeps its default, one not known is said on stderr.
 
     [radio]
     threads = 4             # files analyzed at a time: a quarter of the cores
-    crossfade = 3           # seconds, between a radio's tracks only
+    crossfade = 1           # seconds, between a radio's tracks only
 
     [keys]
     play_pause = Space c    # an action = its keys, by spaces
@@ -386,7 +386,7 @@ track not heard yet passes. The
 queue shows the radio's glyph and where it started; rows taken out of
 it leave it the radio, anything loaded or appended ends it; it
 survives a restart with the queue. While a radio plays mpd crossfades
-its tracks, three seconds by default (`[radio] crossfade`, 0 for
+its tracks, a second by default (`[radio] crossfade`, 0 for
 none), and goes back to what it had when the radio ends. Save, in the queue's head while the
 radio plays (and `save_queue` in Ctrl+K's list), writes the queue so
 far as a playlist, named "Radio" and what it started from (the
