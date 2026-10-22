@@ -139,7 +139,7 @@ async fn session(
         return Ok(());
     }
     let _ = client.command(cmd::SetBinaryLimit(1 << 20)).await;
-    send_status(&client, events).await?;
+    let mut queue_version = Some(send_status(&client, events).await?);
     let mut library = send_library(&client, events, db).await?;
     send_queue(&client, events).await?;
     let slots = Arc::new(Semaphore::new(3));
@@ -163,30 +163,34 @@ async fn session(
                 library = send_library(&client, events, db).await?;
             }
             change = changes.next() => match change {
-                Some(ConnectionEvent::SubsystemChange(sub)) => match sub {
-                    Subsystem::Player | Subsystem::Mixer | Subsystem::Options => {
-                        send_status(&client, events).await?;
-                    }
-                    Subsystem::Queue => {
-                        send_status(&client, events).await?;
+                // mpd lists every subsystem changed while the client was
+                // busy in one idle reply, and mpd_client keeps the first
+                // only: so any change reads the status, and the queue
+                // follows its version, whichever subsystem was named
+                Some(ConnectionEvent::SubsystemChange(sub)) => {
+                    let version = send_status(&client, events).await?;
+                    if queue_version != Some(version) {
+                        queue_version = Some(version);
                         send_queue(&client, events).await?;
                     }
-                    Subsystem::Database if asked => {
-                        asked = false;
-                        reload_at = None;
-                        library = send_library(&client, events, db).await?;
-                    }
-                    Subsystem::Database => reload_at = Some(tokio::time::Instant::now() + LIBRARY_STILL),
-                    #[allow(clippy::collapsible_match)]
-                    Subsystem::Update if asked => {
-                        if client.command(cmd::Status).await.is_ok_and(|s| s.update_job.is_none()) {
+                    match sub {
+                        Subsystem::Database if asked => {
                             asked = false;
                             reload_at = None;
                             library = send_library(&client, events, db).await?;
                         }
+                        Subsystem::Database => reload_at = Some(tokio::time::Instant::now() + LIBRARY_STILL),
+                        #[allow(clippy::collapsible_match)]
+                        Subsystem::Update if asked => {
+                            if client.command(cmd::Status).await.is_ok_and(|s| s.update_job.is_none()) {
+                                asked = false;
+                                reload_at = None;
+                                library = send_library(&client, events, db).await?;
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Some(ConnectionEvent::ConnectionClosed(e)) => anyhow::bail!("connection closed: {e}"),
                 None => anyhow::bail!("connection closed"),
             },
@@ -254,10 +258,12 @@ async fn session(
 
 const LIBRARY_STILL: Duration = Duration::from_secs(30 * 60);
 
-async fn send_status(client: &Client, events: &Out) -> Result<()> {
+/// Sends the status and the current song, and tells the queue's version.
+async fn send_status(client: &Client, events: &Out) -> Result<u32> {
     let (status, song) = client.command_list((cmd::Status, cmd::CurrentSong)).await?;
+    let version = status.playlist_version;
     events.send(Event::Status(Box::new(Now { status, song })));
-    Ok(())
+    Ok(version)
 }
 
 async fn send_library(client: &Client, events: &Out, db: &crate::db::Shared) -> Result<Arc<Library>> {
