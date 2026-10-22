@@ -286,6 +286,39 @@ fn shifted(centre: &Axis, deltas: &Axis) -> Axis {
     target
 }
 
+/// The two ends of an album's journey: its two tracks farthest apart
+/// on the levers; none for an album of one, or of tracks all alike.
+fn farthest(seeds: &[Axis]) -> Option<(Axis, Axis)> {
+    let mut best: Option<(f32, Axis, Axis)> = None;
+    for (i, a) in seeds.iter().enumerate() {
+        for b in &seeds[i + 1..] {
+            let d = rms(a, b, &LEVERS);
+            if d > 0.0 && best.as_ref().is_none_or(|(far, _, _)| d > *far) {
+                best = Some((d, *a, *b));
+            }
+        }
+    }
+    best.map(|(_, a, b)| (a, b))
+}
+
+/// Where the path aims at a point: the seed shifted by the arc's part
+/// or, on a journey, between its two ends on the levers, out over an
+/// arc's worth of tracks and back over the next, the world the seed's.
+fn aim(centre: &Axis, journey: Option<&(Axis, Axis)>, at: usize) -> Axis {
+    match journey {
+        Some((a, b)) => {
+            let pos = at % (2 * STEP);
+            let t = if pos < STEP { (pos as f32 + 0.5) / STEP as f32 } else { 1.0 - ((pos - STEP) as f32 + 0.5) / STEP as f32 };
+            let mut target = *centre;
+            for &i in &LEVERS {
+                target[i] = a[i] + t * (b[i] - a[i]);
+            }
+            target
+        }
+        None => shifted(centre, &shift(at)),
+    }
+}
+
 struct Candidate<'a> {
     uri: &'a str,
     axis: Axis,
@@ -327,6 +360,10 @@ pub fn path(library: &Library, vectors: &Vectors, seed: &Seed, queue: &[String],
         return Vec::new();
     }
     let centre = mean(&seeds);
+    let journey = match seed {
+        Seed::Album(_) => farthest(&seeds),
+        _ => None,
+    };
     let pool = match seed {
         Seed::Artist(_) => pool,
         _ => world(pool, &centre),
@@ -343,7 +380,8 @@ pub fn path(library: &Library, vectors: &Vectors, seed: &Seed, queue: &[String],
     let author = |uri: &str| library.place(uri).map(|(a, _)| library.albums[a].artist.clone());
     let mut out: Vec<String> = Vec::with_capacity(n);
     for at in 0..n {
-        let target = shifted(&centre, &shift(at));
+        // an arc starts over with every call, a journey goes on from where the queue is
+        let target = aim(&centre, journey.as_ref(), if journey.is_some() { queue.len() + at } else { at });
         let previous: Option<Axis> = out.last().or(queue.last()).and_then(|u| axes.of.get(u)).copied();
         let recent: Vec<String> = queue.iter().chain(out.iter()).rev().take(RECENT).filter_map(|u| author(u)).collect();
         let mut best: Vec<(f32, usize)> = pool
@@ -636,6 +674,10 @@ mod tests {
         let seeds: Vec<Axis> = seed_uris(&library, &seed).iter().filter_map(|u| axes.of.get(u)).copied().collect();
         assert!(!seeds.is_empty(), "no seed: {seed:?}");
         let centre = mean(&seeds);
+        let journey = match seed {
+            Seed::Album(_) => farthest(&seeds),
+            _ => None,
+        };
         if let Ok(runs) = std::env::var("ARC_RUNS").map(|r| r.parse::<usize>().unwrap()) {
             // where the seed track itself lands, over many arcs, and the terms of the cost, rms over the picks
             let Seed::Track(uri) = &seed else { panic!("ARC_RUNS wants a track") };
@@ -646,7 +688,7 @@ mod tests {
                 at[p.iter().position(|u| u == uri).unwrap_or(STEP)] += 1;
                 for (i, u) in p.iter().enumerate() {
                     let a = axes.of[u];
-                    arc += rms(&a, &shifted(&centre, &shift(i)), &LEVERS).powi(2) as f64;
+                    arc += rms(&a, &aim(&centre, journey.as_ref(), i), &LEVERS).powi(2) as f64;
                     world += rms(&a, &centre, &WORLD).powi(2) as f64;
                     if i > 0 {
                         glue += rms(&a, &axes.of[&p[i - 1]], &GLUE).powi(2) as f64;
@@ -658,13 +700,21 @@ mod tests {
             println!("the miss, rms in percentiles: the arc {:.2}  the world {:.2}  the glue {:.2}", (arc / n as f64).sqrt(), (world / n as f64).sqrt(), (glue / (n - runs) as f64).sqrt());
             return;
         }
-        let path = path(&library, &vectors, &seed, &[], STEP);
+        let path = path(&library, &vectors, &seed, &[], 2 * STEP);
         println!("{:3} {:16} {:5} {}", "", "", "", NAMES.iter().map(|n| format!("{n:>8}")).collect::<String>());
         println!("{:3} {:16} {:5} {}", "", "seed", "", centre.iter().map(|x| format!("{x:8.2}")).collect::<String>());
+        if let Some((a, b)) = &journey {
+            println!("{:3} {:16} {:5} {}", "", "out from", "", a.iter().map(|x| format!("{x:8.2}")).collect::<String>());
+            println!("{:3} {:16} {:5} {}", "", "to", "", b.iter().map(|x| format!("{x:8.2}")).collect::<String>());
+        }
         let mut previous: Option<Axis> = None;
         for (at, uri) in path.iter().enumerate() {
-            let part = ARC[(at / PER_PART) % ARC.len()].0;
-            let target = shifted(&centre, &shift(at));
+            let part = match journey {
+                Some(_) if at < STEP => "out",
+                Some(_) => "back",
+                None => ARC[(at / PER_PART) % ARC.len()].0,
+            };
+            let target = aim(&centre, journey.as_ref(), at);
             let a = axes.of[uri];
             let (al, t) = library.place(uri).unwrap();
             let track = &library.albums[al].tracks[t];
@@ -672,6 +722,44 @@ mod tests {
             println!("{:3} {:16} {:5.2} {}  {} - {}", "", "", cost(&a, &target, &centre, previous.as_ref(), false), a.iter().map(|x| format!("{x:8.2}")).collect::<String>(), track.artist, track.title);
             previous = Some(a);
         }
+    }
+
+    #[test]
+    fn an_album_is_a_journey_between_its_two_farthest_tracks() {
+        // an album of five across the tempo, the library's other tracks around them
+        let lib = library(&[("A", "a", 5), ("B", "b", 20)]);
+        let mut vectors = Vectors::default();
+        for i in 1..=5 {
+            vectors.by_uri.insert(format!("A/a/{i}.ogg"), at(0.2 * i as f32));
+        }
+        for i in 1..=20 {
+            vectors.by_uri.insert(format!("B/b/{i}.ogg"), at(0.05 * i as f32));
+        }
+        let axes = Axes::of(&vectors);
+        let seeds: Vec<Axis> = (1..=5).map(|i| axes.of[&format!("A/a/{i}.ogg")]).collect();
+        let (a, b) = farthest(&seeds).expect("two ends");
+        assert_eq!((a[DRIVE], b[DRIVE]), (axes.of["A/a/1.ogg"][DRIVE], axes.of["A/a/5.ogg"][DRIVE]), "the slowest and the fastest");
+        assert!(farthest(&seeds[..1]).is_none(), "one track is no journey");
+        assert!(farthest(&[seeds[0], seeds[0]]).is_none(), "nor two alike");
+        let centre = mean(&seeds);
+        let out: Vec<f32> = (0..STEP).map(|i| aim(&centre, Some(&(a, b)), i)[DRIVE]).collect();
+        let back: Vec<f32> = (STEP..2 * STEP).map(|i| aim(&centre, Some(&(a, b)), i)[DRIVE]).collect();
+        assert!(out.windows(2).all(|w| w[1] > w[0]) && back.windows(2).all(|w| w[1] < w[0]), "out rising, back falling");
+        assert!(out[0] > a[DRIVE] && out[STEP - 1] < b[DRIVE], "neither end reached exactly, so the turn is not a repeat");
+        assert!((out[STEP - 1] - back[0]).abs() < 1e-6 && (out[0] - back[STEP - 1]).abs() < 1e-6, "the way back mirrors the way out");
+        assert_eq!(aim(&centre, Some(&(a, b)), 2 * STEP)[DRIVE], out[0], "then out again");
+        assert_eq!(aim(&centre, Some(&(a, b)), 3)[BRIGHT], centre[BRIGHT], "the world's axes stay the album's");
+        // the path follows: over many runs the first picks are slower than the last of the way out
+        let seed = Seed::Album("A\u{1f}a".into());
+        let (mut first, mut last) = (0.0, 0.0);
+        for _ in 0..40 {
+            let p = path(&lib, &vectors, &seed, &[], STEP);
+            first += axes.of[&p[0]][DRIVE];
+            last += axes.of[&p[STEP - 1]][DRIVE];
+        }
+        assert!(last - first > 0.3 * 40.0, "the way out rises: first {first:.1}, last {last:.1} over 40 runs");
+        let more = path(&lib, &vectors, &seed, &(1..=5).map(|i| format!("A/a/{i}.ogg")).chain((1..=10).map(|i| format!("B/b/{i}.ogg"))).collect::<Vec<_>>(), 1);
+        assert_eq!(more.len(), 1, "a refill goes on from where the queue is");
     }
 
     #[test]

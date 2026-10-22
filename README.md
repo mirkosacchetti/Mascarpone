@@ -323,8 +323,8 @@ for the record and for `sqlite3`.
 their cards, right of the play button, and at the end of every track
 row the library has) starts a radio from what is
 selected, and brings up the queue over the page, as Tab does: a track, the seed and nothing more, nearest to itself and so
-likely to come first, about four times in ten, or not; an album,
-whose tracks together are what the path starts from, none of them
+likely to come first, about four times in ten, or not; an album, a
+journey between its two most different tracks, none of its tracks
 forced in; an artist, fifteen of whose tracks open it at random, and
 whose tracks are all it plays. Then
 three arcs of fifteen tracks, and another arc as the first track of
@@ -366,7 +366,12 @@ moving, through-composed, a crescendo, faster and denser, the pulse
 put to the test), the climax (the tension sustained, the fastest and
 thickest pulse, a motif hammered, an arch that resolves), the new
 equilibrium (home: on a key, the repetition of the start, slower and
-sparser, steady, a fade). Each track of the arc costs the sum of
+sparser, steady, a fade). An album's radio is not the arc but a
+journey: the album's two tracks farthest apart on the levers are its
+ends, and the target goes from the one to the other over fifteen
+tracks and back over the next fifteen, on the levers only, the world
+the album's; where the arc starts over with every fifteen, the
+journey goes on from where the queue is. Each track of the arc costs the sum of
 four terms, each 0 to 1: its miss of the part's target on the
 levers; half its distance from the seed on the world's axes; half
 its distance from the track before on the glue's (bright, loud,
