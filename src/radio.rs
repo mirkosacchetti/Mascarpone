@@ -259,10 +259,10 @@ fn own_tracks(library: &Library, name: &str) -> Vec<String> {
 /// fade.
 const ARC: [(&str, &[(usize, f32)]); 5] = [
     ("equilibrium", &[]),
-    ("break", &[(TENSION, 0.2), (MOTION, 0.2), (STEADY, -0.25), (ARCH, -0.15)]),
-    ("adventure", &[(TENSION, 0.25), (MOTION, 0.3), (DRIVE, 0.15), (STEADY, -0.1), (RISE, 0.25)]),
-    ("climax", &[(TENSION, 0.25), (MOTION, -0.1), (DRIVE, 0.3), (STEADY, 0.15), (ARCH, 0.25)]),
-    ("new equilibrium", &[(TENSION, -0.25), (MOTION, -0.25), (DRIVE, -0.15), (STEADY, 0.15), (RISE, -0.15)]),
+    ("break", &[(TENSION, 0.35), (MOTION, 0.35), (STEADY, -0.35), (ARCH, -0.2)]),
+    ("adventure", &[(TENSION, 0.45), (MOTION, 0.5), (DRIVE, 0.3), (STEADY, -0.15), (RISE, 0.35)]),
+    ("climax", &[(TENSION, 0.45), (MOTION, -0.2), (DRIVE, 0.5), (STEADY, 0.25), (ARCH, 0.4)]),
+    ("new equilibrium", &[(TENSION, -0.45), (MOTION, -0.45), (DRIVE, -0.3), (STEADY, 0.25), (RISE, -0.25)]),
 ];
 
 fn shift(at: usize) -> Axis {
