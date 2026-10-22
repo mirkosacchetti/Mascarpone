@@ -125,13 +125,6 @@ fn root(app: &mut App, ui: &mut Ui, area: R) {
             let Some(library) = app.library.clone() else { return };
             let albums = app.tab == Tab::Albums;
             let mut grid = std::mem::take(if albums { &mut app.albums } else { &mut app.artists });
-            if !grid.dealt.as_ref().is_some_and(|d| Arc::ptr_eq(d, &library)) {
-                let n = if albums { library.albums.len() } else { library.artists.len() };
-                grid.order = (0..n).collect();
-                fastrand::shuffle(&mut grid.order);
-                grid.selected = grid.selected.min(n.saturating_sub(1));
-                grid.dealt = Some(library.clone());
-            }
             let cards = if albums { Cards::Albums(&library) } else { Cards::Artists(&library) };
             full_grid(app, ui, &mut grid, cards, area);
             *(if albums { &mut app.albums } else { &mut app.artists }) = grid;

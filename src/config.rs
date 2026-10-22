@@ -79,7 +79,7 @@ const ACTIONS: &[(Shortcut, &str, &str, Option<&str>)] = &[
     (Shortcut::Radio, "radio", "s", Some("Radio from what is selected: a track, an album, an artist")),
     (Shortcut::SaveQueue, "save_queue", "", Some("Save the queue as a playlist")),
     (Shortcut::ClearQueue, "clear_queue", "", Some("Clear the queue")),
-    (Shortcut::Refresh, "refresh", "Ctrl+r", Some("Refresh: mpd's database, the library")),
+    (Shortcut::Refresh, "refresh", "Ctrl+r", Some("Refresh: mpd's database, the library, the grids dealt anew")),
     (Shortcut::ZoomIn, "zoom_in", "Ctrl+= Ctrl++ Ctrl+KP_Add", Some("Zoom in")),
     (Shortcut::ZoomOut, "zoom_out", "Ctrl+- Ctrl+KP_Subtract", Some("Zoom out")),
     (Shortcut::ZoomReset, "zoom_reset", "Ctrl+0 Ctrl+KP_0", Some("Zoom back to 100%")),

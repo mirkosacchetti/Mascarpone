@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -14,7 +15,8 @@ use crate::master::{self, Master, Source};
 use crate::mpd::{Command, Event, Now};
 use crate::pages::{self, ArtistPage, Plays, Tracks};
 use crate::picker::{self, Kind, Modal};
-use crate::radio::{self, Job, Relations, Seed, Vectors};
+use crate::archive::Job;
+use crate::radio::{self, Seed, Vectors};
 use crate::rl::{self, Input};
 use crate::ui::{Scroll, Ui};
 
@@ -45,7 +47,6 @@ pub struct Grid {
     pub scroll: Scroll,
     pub columns: usize,
     pub reveal: bool,
-    pub dealt: Option<Arc<Library>>,
 }
 
 impl Grid {
@@ -112,9 +113,8 @@ pub struct Clock {
 pub struct App {
     pub commands: UnboundedSender<Command>,
     events: Receiver<Event>,
-    radio: std::sync::mpsc::Sender<Job>,
+    archive: std::sync::mpsc::Sender<Job>,
     pub vectors: Option<Arc<Vectors>>,
-    pub relations: Option<Arc<Relations>>,
     pub analyzing: Option<(usize, usize)>,
     pub linking: Option<(usize, usize)>,
     early: Vec<Event>,
@@ -134,6 +134,8 @@ pub struct App {
     pub artists: Grid,
     pub playlists: Grid,
     pub shown_at: Instant,
+    /// The grids are dealt anew with the next library: asked by Refresh.
+    redeal: bool,
     pub pages: Vec<Page>,
     forward: Vec<Page>,
     under_queue: Option<(Tab, Vec<Page>)>,
@@ -144,14 +146,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(commands: UnboundedSender<Command>, events: Receiver<Event>, radio: std::sync::mpsc::Sender<Job>) -> App {
+    pub fn new(commands: UnboundedSender<Command>, events: Receiver<Event>, archive: std::sync::mpsc::Sender<Job>) -> App {
         App {
             pictures: Pictures::new(commands.clone()),
             commands,
             events,
-            radio,
+            archive,
             vectors: None,
-            relations: None,
             analyzing: None,
             linking: None,
             early: Vec::new(),
@@ -170,6 +171,7 @@ impl App {
             artists: Grid::default(),
             playlists: Grid::default(),
             shown_at: Instant::now(),
+            redeal: false,
             pages: Vec::new(),
             forward: Vec::new(),
             under_queue: None,
@@ -285,8 +287,22 @@ impl App {
                 if self.library.is_some() {
                     self.notice(totals, Some(Duration::from_secs(4)));
                 }
-                let _ = self.radio.send(Job::Library(library.clone()));
-                self.library = Some(library);
+                let _ = self.archive.send(Job::Library(library.clone()));
+                // the grids: dealt at random once, with the first library,
+                // and again when Refresh asks; a library that comes on its
+                // own (mpd's database changed) keeps the order, the albums
+                // and artists gone dropped, the new ones shuffled in at the end
+                let old = self.library.replace(library.clone());
+                match old {
+                    Some(old) if !std::mem::take(&mut self.redeal) => {
+                        carry(&mut self.albums, library.albums.len(), |i| library.album_index(&old.albums[i].key));
+                        carry(&mut self.artists, library.artists.len(), |i| library.artist(&old.artists[i].name));
+                    }
+                    _ => {
+                        deal(&mut self.albums, library.albums.len());
+                        deal(&mut self.artists, library.artists.len());
+                    }
+                }
                 self.load_tab();
                 self.refresh_pages();
                 self.set_clock();
@@ -309,7 +325,6 @@ impl App {
                 self.vectors = Some(vectors);
                 self.radio_tick();
             }
-            Event::Relations(relations) => self.relations = Some(relations),
             Event::Analyzing { done, total } => {
                 if done >= total && self.analyzing.is_some() {
                     self.notice(format!("{}  {}", glyphs::RADIO, pages::count(total, glyphs::TRACK)), Some(Duration::from_secs(4)));
@@ -322,7 +337,7 @@ impl App {
                     for p in &list {
                         ui.fonts.learn(&p.name);
                     }
-                    let _ = self.radio.send(Job::Playlists(list.clone()));
+                    let _ = self.archive.send(Job::Playlists(list.clone()));
                     library.set_playlists(list);
                 }
             }
@@ -347,8 +362,7 @@ impl App {
     pub fn load_tab(&mut self) {
         let Some(library) = self.library.clone() else { return };
         match self.tab {
-            Tab::Albums => deal(&mut self.albums, &library, library.albums.len()),
-            Tab::Artists => deal(&mut self.artists, &library, library.artists.len()),
+            Tab::Albums | Tab::Artists => {}
             Tab::Playlists => {
                 self.playlists.order = (0..library.playlists().len()).collect();
                 self.playlists.selected = 0;
@@ -450,7 +464,7 @@ impl App {
             Source::Radio { seed: Seed::Artist(artist) } => ("radio:artist", Some(artist.clone())),
             _ => ("queue", None),
         };
-        let _ = self.radio.send(Job::Origin { path: path.clone(), name: name.to_owned(), origin: origin.to_owned(), url });
+        let _ = self.archive.send(Job::Origin { path: path.clone(), name: name.to_owned(), origin: origin.to_owned(), url });
         if matches!(self.master.source, Source::Radio { .. }) {
             self.notice(format!("{}  {name}", glyphs::PLAYLIST), Some(Duration::from_secs(4)));
         } else {
@@ -604,10 +618,8 @@ impl App {
         let Some(library) = self.library.clone() else { return };
         let mut uris = radio::opening(&library, &seed);
         let empty = Vectors::default();
-        let no_links = Relations::default();
         let vectors = self.vectors.as_deref().unwrap_or(&empty);
-        let relations = self.relations.as_deref().unwrap_or(&no_links);
-        let more = radio::path(&library, vectors, relations, &seed, &uris, radio::ARCS * radio::STEP);
+        let more = radio::path(&library, vectors, &seed, &uris, radio::ARCS * radio::STEP);
         uris.extend(more);
         if uris.is_empty() {
             self.notice(format!("{}  {}", glyphs::RADIO, glyphs::NOTHING), Some(Duration::from_secs(4)));
@@ -634,9 +646,7 @@ impl App {
         if left >= radio::STEP {
             return;
         }
-        let no_links = Relations::default();
-        let relations = self.relations.as_deref().unwrap_or(&no_links);
-        let more = radio::path(library, vectors, relations, seed, &self.master.uris, radio::STEP);
+        let more = radio::path(library, vectors, seed, &self.master.uris, radio::STEP);
         if more.is_empty() {
             return;
         }
@@ -792,7 +802,7 @@ impl App {
                     self.send(Command::Random(on));
                 }
                 if let Some(library) = &self.library {
-                    let _ = self.radio.send(Job::Playlists(library.playlists().clone()));
+                    let _ = self.archive.send(Job::Playlists(library.playlists().clone()));
                 }
             }
             Action::Mpd(Command::Seek(to)) => {
@@ -824,6 +834,7 @@ impl App {
             Action::Zoom(step) => crate::size::zoom(step),
             Action::Refresh => {
                 self.notice(format!("{}  MPD", glyphs::REFRESH), None);
+                self.redeal = true;
                 self.send(Command::Refresh);
             }
             Action::Radio(seed) => self.start_radio(seed),
@@ -860,13 +871,26 @@ fn reopen(page: &Page, library: &Arc<Library>) -> Option<Page> {
     }
 }
 
-fn deal(grid: &mut Grid, library: &Arc<Library>, n: usize) {
+/// A grid dealt at random, from the top.
+fn deal(grid: &mut Grid, n: usize) {
     grid.order = (0..n).collect();
     fastrand::shuffle(&mut grid.order);
     grid.selected = grid.selected.min(n.saturating_sub(1));
     grid.scroll.offset = 0.0;
     grid.reveal = true;
-    grid.dealt = Some(library.clone());
+}
+
+/// A grid carried over to a new library: the order kept where its
+/// cards are still there (`place` gives the new index of an old one),
+/// the newcomers shuffled in at the end, the scroll where it was.
+fn carry(grid: &mut Grid, n: usize, place: impl Fn(usize) -> Option<usize>) {
+    let mut order: Vec<usize> = grid.order.iter().filter_map(|&i| place(i)).collect();
+    let present: HashSet<usize> = order.iter().copied().collect();
+    let mut new: Vec<usize> = (0..n).filter(|i| !present.contains(i)).collect();
+    fastrand::shuffle(&mut new);
+    order.extend(new);
+    grid.order = order;
+    grid.selected = grid.selected.min(n.saturating_sub(1));
 }
 
 fn learn(ui: &Ui, library: &Library) {

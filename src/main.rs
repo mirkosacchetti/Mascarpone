@@ -1,4 +1,5 @@
 mod app;
+mod archive;
 mod bars;
 mod config;
 mod covers;
@@ -75,10 +76,10 @@ fn main() {
     }
 
     let db = db::open();
-    let (radio, jobs) = std::sync::mpsc::channel();
-    let (commands, events, out) = mpd::start(radio.clone(), db.clone());
-    radio::start(jobs, out, commands.clone(), db);
-    let mut app = app::App::new(commands, events, radio);
+    let (archive, jobs) = std::sync::mpsc::channel();
+    let (commands, events, out) = mpd::start(archive.clone(), db.clone());
+    archive::start(jobs, out, commands.clone(), db);
+    let mut app = app::App::new(commands, events, archive);
     let mut ui = ui::Ui::new();
     let mut more: u8 = 2;
     let mut held = false;

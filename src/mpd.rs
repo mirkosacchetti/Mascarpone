@@ -53,7 +53,6 @@ pub enum Event {
     Artist { name: String, info: crate::net::Info },
     Vectors(Arc<crate::radio::Vectors>),
     Analyzing { done: usize, total: usize },
-    Relations(Arc<crate::radio::Relations>),
     Linking { done: usize, total: usize },
 }
 
@@ -77,7 +76,7 @@ fn address() -> String {
     format!("{}:{}", config.host, config.port)
 }
 
-pub fn start(radio: std::sync::mpsc::Sender<crate::radio::Job>, db: crate::db::Shared) -> (mpsc::UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>, Out) {
+pub fn start(archive: std::sync::mpsc::Sender<crate::archive::Job>, db: crate::db::Shared) -> (mpsc::UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>, Out) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
     let out = Out(ev_tx);
@@ -89,7 +88,7 @@ pub fn start(radio: std::sync::mpsc::Sender<crate::radio::Job>, db: crate::db::S
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(run(cmd_rx, events, radio, db));
+            rt.block_on(run(cmd_rx, events, archive, db));
         })
         .expect("mpd thread");
     (cmd_tx, ev_rx, out)
@@ -106,11 +105,11 @@ impl Out {
     }
 }
 
-async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: Out, radio: std::sync::mpsc::Sender<crate::radio::Job>, db: crate::db::Shared) {
+async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: Out, archive: std::sync::mpsc::Sender<crate::archive::Job>, db: crate::db::Shared) {
     let address = address();
     let net = crate::net::Net::new();
     loop {
-        match session(&address, &mut commands, &events, &net, &radio, &db).await {
+        match session(&address, &mut commands, &events, &net, &archive, &db).await {
             Ok(()) => return,
             Err(e) => {
                 events.send(Event::Disconnected { reason: e.to_string() });
@@ -125,7 +124,7 @@ async fn session(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &Out,
     net: &Arc<crate::net::Net>,
-    radio: &std::sync::mpsc::Sender<crate::radio::Job>,
+    archive: &std::sync::mpsc::Sender<crate::archive::Job>,
     db: &crate::db::Shared,
 ) -> Result<()> {
     let password = crate::config::get().password.as_deref();
@@ -140,7 +139,7 @@ async fn session(
     }
     let _ = client.command(cmd::SetBinaryLimit(1 << 20)).await;
     send_status(&client, events).await?;
-    let mut library = send_library(&client, events).await?;
+    let mut library = send_library(&client, events, db).await?;
     send_queue(&client, events).await?;
     let slots = Arc::new(Semaphore::new(3));
     let lines = Arc::new(Semaphore::new(2));
@@ -160,7 +159,7 @@ async fn session(
         tokio::select! {
             _ = tokio::time::sleep_until(reload_at.unwrap_or_else(tokio::time::Instant::now)), if reload_at.is_some() => {
                 reload_at = None;
-                library = send_library(&client, events).await?;
+                library = send_library(&client, events, db).await?;
             }
             change = changes.next() => match change {
                 Some(ConnectionEvent::SubsystemChange(sub)) => match sub {
@@ -174,7 +173,7 @@ async fn session(
                     Subsystem::Database if asked => {
                         asked = false;
                         reload_at = None;
-                        library = send_library(&client, events).await?;
+                        library = send_library(&client, events, db).await?;
                     }
                     Subsystem::Database => reload_at = Some(tokio::time::Instant::now() + LIBRARY_STILL),
                     #[allow(clippy::collapsible_match)]
@@ -182,7 +181,7 @@ async fn session(
                         if client.command(cmd::Status).await.is_ok_and(|s| s.update_job.is_none()) {
                             asked = false;
                             reload_at = None;
-                            library = send_library(&client, events).await?;
+                            library = send_library(&client, events, db).await?;
                         }
                     }
                     _ => {}
@@ -209,17 +208,17 @@ async fn session(
                     if let Some(task) = linking.take() {
                         task.abort();
                     }
-                    let (net, radio) = (net.clone(), radio.clone());
+                    let (net, archive) = (net.clone(), archive.clone());
                     linking = Some(tokio::spawn(async move {
                         for (name, mbids) in names {
                             let job = match crate::net::links(&net, &name, &mbids).await {
-                                Ok(l) => crate::radio::Job::Links { name, mbid: l.mbid, deezer: l.deezer, links: l.links, error: None },
+                                Ok(l) => crate::archive::Job::Links { name, mbid: l.mbid, deezer: l.deezer, links: l.links, error: None },
                                 Err(e) => {
                                     eprintln!("links of {name}: {e}");
-                                    crate::radio::Job::Links { name, mbid: None, deezer: None, links: Vec::new(), error: Some(e.to_string()) }
+                                    crate::archive::Job::Links { name, mbid: None, deezer: None, links: Vec::new(), error: Some(e.to_string()) }
                                 }
                             };
-                            if radio.send(job).is_err() {
+                            if archive.send(job).is_err() {
                                 return;
                             }
                         }
@@ -233,7 +232,7 @@ async fn session(
                     }
                     asked = client.command(cmd::Update::new()).await.is_ok();
                     if !asked {
-                        library = send_library(&client, events).await?;
+                        library = send_library(&client, events, db).await?;
                     }
                     send_queue(&client, events).await?;
                 }
@@ -260,13 +259,13 @@ async fn send_status(client: &Client, events: &Out) -> Result<()> {
     Ok(())
 }
 
-async fn send_library(client: &Client, events: &Out) -> Result<Arc<Library>> {
-    let library = Arc::new(load_library(client).await?);
+async fn send_library(client: &Client, events: &Out, db: &crate::db::Shared) -> Result<Arc<Library>> {
+    let library = Arc::new(load_library(client, db).await?);
     events.send(Event::Library(library.clone()));
     Ok(library)
 }
 
-async fn load_library(client: &Client) -> Result<Library> {
+async fn load_library(client: &Client, db: &crate::db::Shared) -> Result<Library> {
     let top = client.raw_command(mpd_client::protocol::command::Command::new("lsinfo")).await?;
     let folders: Vec<String> = top.fields().filter(|(k, _)| *k == "directory").map(|(_, v)| v.to_owned()).collect();
     let mut songs = Vec::new();
@@ -279,110 +278,25 @@ async fn load_library(client: &Client) -> Result<Library> {
             songs = all;
         }
     }
-    let mut albums = tokio::task::spawn_blocking(move || Library::gather(songs)).await?;
-    split_credits(client, &mut albums).await;
-    Ok(tokio::task::spawn_blocking(move || Library::assemble(albums)).await?)
-}
-
-/// The credits the tags may split: an album with several artist ids is
-/// asked for its first file's own comments, which mpd does not index,
-/// where a tagger that matched the album on MusicBrainz names the
-/// artists one by one (`ALBUMARTISTS`, a value each; `ARTISTS` when
-/// the file has no album artist). Whether the names are taken is the
-/// library's rule.
-async fn split_credits(client: &Client, albums: &mut [crate::library::Album]) {
-    let mut split = 0;
-    for album in albums.iter_mut().filter(|a| a.members.len() == 1) {
-        // the first track that names them: a stray copy of one track,
-        // tagged with the album but without the artists, is passed over
-        let uris: Vec<String> = album.tracks.iter().map(|t| t.uri.clone()).collect();
-        for uri in uris {
-            let names = if Path::new(&uri).extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3")) {
-                // mpd (0.24) reads a many-valued ID3v2.4 frame as its first
-                // value repeated, in the index and in the comments alike, so
-                // an mp3's tags are read from the file: the ids too, which mpd
-                // gave one of
-                let path = crate::library::music_dir().join(&uri);
-                let Ok(Some((names, ids))) = tokio::task::spawn_blocking(move || id3_credit(&path)).await else { continue };
-                if ids.len() > 1 && album.members[0].mbids.len() < ids.len() {
-                    album.members[0].mbids = ids;
-                }
-                names
-            } else if album.members[0].mbids.len() > 1 || (album.members[0].mbids.is_empty() && looks_joint(&album.artist)) {
-                // several ids, or none and a credit that reads as several
-                // names: the names may be there, one by one
-                let command = mpd_client::protocol::command::Command::new("readcomments").argument(uri.clone());
-                let frame = match client.raw_command(command).await {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        eprintln!("comments of {uri}: {e}");
-                        continue;
-                    }
-                };
-                let values = |tag: &str| frame.fields().filter(|(k, _)| k.eq_ignore_ascii_case(tag)).map(|(_, v)| v.to_owned()).collect::<Vec<String>>();
-                let mut names = values("albumartists");
-                if names.is_empty() {
-                    names = values("artists");
-                }
-                names
-            } else {
-                break;
-            };
-            if names.is_empty() {
-                continue;
-            }
-            if album.split(&names) {
+    // a credit of several ids (mpd gives them in the tags' order) splits
+    // into the artists the database names for them, learnt from
+    // MusicBrainz when the credit's members were asked for; one not
+    // named yet stays whole until the next library
+    let names = db.lock().unwrap().names_by_mbid().unwrap_or_default();
+    Ok(tokio::task::spawn_blocking(move || {
+        let mut albums = Library::gather(songs);
+        let mut split = 0;
+        for a in &mut albums {
+            if a.split_by_ids(&names) || a.split_joined() {
                 split += 1;
             }
-            break;
         }
-        if album.members.len() == 1 && album.split_joined() {
-            split += 1;
+        if split > 0 {
+            eprintln!("library: {split} credits split into their artists");
         }
-    }
-    if split > 0 {
-        eprintln!("library: {split} credits split into their artists");
-    }
-}
-
-/// Whether a credit reads as several names joined: only to spare the
-/// files that cannot be (what splits is the tags' own list of names).
-fn looks_joint(credit: &str) -> bool {
-    let lower = credit.to_lowercase();
-    ["&", ",", "/", ";", " and ", " with ", " feat", " e ", " y ", " et ", " und "].iter().any(|j| lower.contains(j))
-}
-
-/// The artists an mp3's tags credit its album to, one by one, with
-/// their ids: the `ALBUMARTISTS` and `MusicBrainz Album Artist Id`
-/// user frames (`ARTISTS` and `MusicBrainz Artist Id` when the file
-/// has no album artist), their values null-separated in ID3v2.4.
-/// None: no tag, or none of those frames.
-fn id3_credit(path: &Path) -> Option<(Vec<String>, Vec<String>)> {
-    let tag = match id3::Tag::read_from_path(path) {
-        Ok(tag) => tag,
-        Err(id3::Error { kind: id3::ErrorKind::NoTag, .. }) => return None,
-        Err(e) => {
-            eprintln!("tags of {}: {e}", path.display());
-            return None;
-        }
-    };
-    let values = |description: &str| -> Vec<String> {
-        tag.extended_texts()
-            .filter(|t| t.description.eq_ignore_ascii_case(description))
-            .flat_map(|t| t.value.split('\0'))
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-            .collect()
-    };
-    let (names, ids) = match values("ALBUMARTISTS") {
-        names if !names.is_empty() => (names, values("MusicBrainz Album Artist Id")),
-        _ => (values("ARTISTS"), values("MusicBrainz Artist Id")),
-    };
-    if names.is_empty() && ids.is_empty() {
-        return None;
-    }
-    Some((names, ids))
+        Library::assemble(albums)
+    })
+    .await?)
 }
 
 async fn send_queue(client: &Client, events: &Out) -> Result<()> {
@@ -508,28 +422,6 @@ async fn perform(client: &Client, command: Command) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_mp3_s_credit_is_read_from_its_frames() {
-        use id3::frame::ExtendedText;
-        use id3::TagLike;
-        let dir = std::env::temp_dir().join(format!("mascarpone-id3-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("1.mp3");
-        std::fs::write(&path, b"").unwrap();
-        let mut tag = id3::Tag::new();
-        tag.set_album_artist("Max Richter / Stéphane Moucha");
-        tag.add_frame(ExtendedText { description: "ALBUMARTISTS".into(), value: "Max Richter\0Stéphane Moucha".into() });
-        tag.add_frame(ExtendedText { description: "MusicBrainz Album Artist Id".into(), value: "richter\0moucha".into() });
-        tag.write_to_path(&path, id3::Version::Id3v24).unwrap();
-        let (names, ids) = id3_credit(&path).unwrap();
-        assert_eq!(names, ["Max Richter", "Stéphane Moucha"]);
-        assert_eq!(ids, ["richter", "moucha"]);
-        let bare = dir.join("2.mp3");
-        std::fs::write(&bare, b"\xff\xfb\x90\x00").unwrap();
-        assert_eq!(id3_credit(&bare), None, "no tag at all");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     /// `cargo test --release mpd::tests::credits_probe -- --ignored --nocapture`
     /// loads the library from the configured mpd and prints the credits
     /// the tags split, each with its members, and the artists' count.
@@ -543,7 +435,7 @@ mod tests {
         } else {
             Client::connect_with_password_opt(TcpStream::connect(&address).await.unwrap(), password).await.unwrap()
         };
-        let library = load_library(&client).await.unwrap();
+        let library = load_library(&client, &crate::db::open()).await.unwrap();
         let mut split = 0;
         for album in library.albums.iter().filter(|a| a.members.len() > 1) {
             split += 1;

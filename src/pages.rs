@@ -635,7 +635,7 @@ impl ArtistPage {
     pub fn new(library: &Arc<Library>, index: usize) -> ArtistPage {
         let mut albums = library.artists[index].albums.clone();
         albums.sort_by_key(|&a| std::cmp::Reverse(library.albums[a].year.as_deref().and_then(|y| y.get(..4)?.parse::<u32>().ok())));
-        ArtistPage { library: library.clone(), index, grid: Grid { order: albums, dealt: Some(library.clone()), ..Grid::default() }, words: ui::Scroll::default() }
+        ArtistPage { library: library.clone(), index, grid: Grid { order: albums, ..Grid::default() }, words: ui::Scroll::default() }
     }
 }
 

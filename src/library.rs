@@ -52,6 +52,17 @@ impl Album {
         self.members.iter().map(|m| m.name.as_str())
     }
 
+    /// Splits the credit by its ids, in the tags' order, into the
+    /// artists named for them: all of them, or none yet.
+    pub fn split_by_ids(&mut self, names: &HashMap<String, String>) -> bool {
+        let [Member { mbids, .. }] = self.members.as_slice() else { return false };
+        if mbids.len() < 2 {
+            return false;
+        }
+        let Some(found) = mbids.iter().map(|id| names.get(id).cloned()).collect::<Option<Vec<String>>>() else { return false };
+        self.split(&found)
+    }
+
     /// Splits a credit without ids on its semicolons, "Anton Webern;
     /// Pierre Boulez": the one join no band's name contains, the one
     /// classical tagging uses between composer and performers. The

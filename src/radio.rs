@@ -1,18 +1,17 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+//! The radio: what a track is measured by, bliss's vector, the voice
+//! and the shape in one, the library's spread, the distance; the arc
+//! of five parts a radio follows from its seed, and the path through
+//! the library that follows it. Functions on a library, its vectors
+//! and a seed: no thread, no database (that is the archive's).
 
-use bliss_audio::decoder::symphonia::SymphoniaDecoder;
-use bliss_audio::decoder::Decoder;
-use bliss_audio::Song;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
-use crate::db::{self, Done, Link, Relation, Stamp};
-use crate::library::{Library, Playlist};
-use crate::mpd::{Event, Out};
+use crate::library::Library;
 use crate::shape::{self, Shape};
-use crate::voice::{Models, Voice};
+use crate::voice::Voice;
 
 pub const N: usize = bliss_audio::NUMBER_FEATURES;
 pub type Vector = [f32; N];
@@ -23,10 +22,6 @@ pub const ARCS: usize = 3;
 const NEAREST: usize = 6;
 const PER_PART: usize = STEP / ARC.len();
 const LONGEST: Duration = Duration::from_secs(15 * 60);
-// const PULL: f32 = 0.35;
-/// How long after the start the analysis waits: the window, the
-/// library and the covers come first, on a quiet machine.
-const SETTLE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Clone)]
 pub struct Vectors {
@@ -72,368 +67,6 @@ pub enum Seed {
     Artist(String),
 }
 
-pub enum Job {
-    Library(Arc<Library>),
-    Playlists(Vec<Playlist>),
-    Origin { path: PathBuf, name: String, origin: String, url: Option<String> },
-    Links { name: String, mbid: Option<String>, deezer: Option<i64>, links: Vec<Link>, error: Option<String> },
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct Relations {
-    pub by_artist: HashMap<String, HashMap<String, f32>>,
-}
-
-impl Relations {
-    fn build(rows: &[Relation]) -> Relations {
-        let mut relations = Relations::default();
-        for row in rows {
-            if row.other == row.artist {
-                continue;
-            }
-            let weight = if row.source == "deezer" { 0.7 } else { 1.0 };
-            let (artist, other) = (row.artist.to_lowercase(), row.other.to_lowercase());
-            for (a, b) in [(&artist, &other), (&other, &artist)] {
-                let w = relations.by_artist.entry(a.clone()).or_default().entry(b.clone()).or_insert(0.0);
-                *w = w.max(weight);
-            }
-        }
-        relations
-    }
-
-    /// The pull's: see `path`.
-    #[allow(dead_code)]
-    fn weight(&self, artist: &str, to: &[&str]) -> f32 {
-        let Some(links) = self.by_artist.get(&artist.to_lowercase()) else { return 0.0 };
-        to.iter().filter_map(|a| links.get(&a.to_lowercase())).copied().fold(0.0, f32::max)
-    }
-}
-
-pub fn start(jobs: mpsc::Receiver<Job>, out: Out, commands: tokio::sync::mpsc::UnboundedSender<crate::mpd::Command>, db: db::Shared) {
-    std::thread::Builder::new()
-        .name("radio".into())
-        .spawn(move || {
-            let (vectors, artists) = {
-                let db = db.lock().unwrap();
-                match (db.vectors(), db.linked()) {
-                    (Ok(vectors), Ok(a)) => (vectors, a),
-                    (Err(e), _) | (_, Err(e)) => {
-                        eprintln!("{}: {e}", db::path().display());
-                        return;
-                    }
-                }
-            };
-            eprintln!("radio: {} tracks analyzed, {} shaped, {} heard for a voice, {} artists linked", vectors.by_uri.len(), vectors.shape.len(), vectors.voice.len(), artists.len());
-            out.send(Event::Vectors(Arc::new(vectors.clone())));
-            let mut radio = Radio { db, out, commands, vectors, artists, library: None, linking: (0, 0), models: Arc::new(OnceLock::new()), started: Instant::now() };
-            radio.run(jobs);
-        })
-        .expect("radio thread");
-}
-
-struct Todo {
-    album: usize,
-    track: usize,
-    path: PathBuf,
-    stamp: Stamp,
-    bliss: bool,
-    voice: bool,
-}
-
-struct Heard {
-    bliss: Option<Result<(Vector, Shape), String>>,
-    voice: Option<Result<Voice, String>>,
-}
-
-/// The voice models, loaded (and optimized by tract, half a second of
-/// CPU) the first time a voice is to be heard; None when they failed.
-fn models(models: &OnceLock<Option<Models>>) -> Option<&Models> {
-    models
-        .get_or_init(|| match Models::load() {
-            Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!("radio: the voice models: {e}: no voice heard");
-                None
-            }
-        })
-        .as_ref()
-}
-
-fn hear(models: &OnceLock<Option<Models>>, t: &Todo) -> Heard {
-    let pre = match <SymphoniaDecoder as Decoder>::decode(&t.path) {
-        Ok(pre) => pre,
-        Err(e) => {
-            let e = e.to_string();
-            return Heard { bliss: t.bliss.then(|| Err(e.clone())), voice: t.voice.then_some(Err(e)) };
-        }
-    };
-    let voice = if t.voice { self::models(models).map(|m| m.hear(&pre.sample_array, 22050).map_err(|e| e.to_string())) } else { None };
-    let bliss = t.bliss.then(|| {
-        Song::analyze_series(&pre.sample_array).map_err(|e| e.to_string()).map(|(analysis, series)| {
-            let mut v = [0f32; N];
-            v.copy_from_slice(&analysis.as_vec());
-            (v, shape::of(&series))
-        })
-    });
-    Heard { bliss, voice }
-}
-
-struct Radio {
-    db: db::Shared,
-    out: Out,
-    commands: tokio::sync::mpsc::UnboundedSender<crate::mpd::Command>,
-    vectors: Vectors,
-    artists: HashMap<String, Option<String>>,
-    library: Option<Arc<Library>>,
-    linking: (usize, usize),
-    models: Arc<OnceLock<Option<Models>>>,
-    started: Instant,
-}
-
-impl Radio {
-    fn run(&mut self, jobs: mpsc::Receiver<Job>) {
-        let mut pending: Option<Arc<Library>> = None;
-        loop {
-            let mut library = match pending.take() {
-                Some(l) => l,
-                None => match jobs.recv() {
-                    Ok(Job::Library(l)) => l,
-                    Ok(job) => {
-                        self.other(job);
-                        continue;
-                    }
-                    Err(_) => return,
-                },
-            };
-            while let Ok(job) = jobs.try_recv() {
-                match job {
-                    Job::Library(l) => library = l,
-                    job => self.other(job),
-                }
-            }
-            self.library = Some(library.clone());
-            {
-                let mut db = self.db.lock().unwrap();
-                if let Err(e) = db.write_library(&library) {
-                    eprintln!("radio: {e}");
-                }
-                match db.linked() {
-                    Ok(a) => self.artists = a,
-                    Err(e) => eprintln!("radio: {e}"),
-                }
-            }
-            self.ask_links(&library);
-            let Some(todo) = self.diff(&library) else { continue };
-            if todo.is_empty() {
-                continue;
-            }
-            // the first analysis waits for the start to settle, still
-            // taking the jobs that come meanwhile
-            let mut later = false;
-            while let Some(left) = (self.started + SETTLE).checked_duration_since(Instant::now()) {
-                match jobs.recv_timeout(left) {
-                    Ok(Job::Library(l)) => {
-                        pending = Some(l);
-                        later = true;
-                        break;
-                    }
-                    Ok(job) => self.other(job),
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                }
-            }
-            if later {
-                continue;
-            }
-            let total = todo.len();
-            eprintln!("radio: {total} tracks to analyze");
-            self.out.send(Event::Analyzing { done: 0, total });
-            let work = Arc::new(Mutex::new(todo));
-            let (done_tx, done_rx) = mpsc::channel::<(Todo, Heard)>();
-            for _ in 0..crate::config::get().threads {
-                let (work, done_tx, models) = (work.clone(), done_tx.clone(), self.models.clone());
-                std::thread::Builder::new()
-                    .name("bliss".into())
-                    .spawn(move || {
-                        lowest_priority();
-                        loop {
-                            let Some(t) = work.lock().unwrap().pop() else { break };
-                            let heard = hear(&models, &t);
-                            if done_tx.send((t, heard)).is_err() {
-                                break;
-                            }
-                        }
-                    })
-                    .expect("bliss thread");
-            }
-            drop(done_tx);
-            let mut done = 0;
-            let mut sent = Instant::now();
-            for (t, heard) in done_rx {
-                self.store(&library, t, heard);
-                done += 1;
-                while let Ok(job) = jobs.try_recv() {
-                    match job {
-                        Job::Library(l) => {
-                            work.lock().unwrap().clear();
-                            pending = Some(l);
-                        }
-                        job => self.other(job),
-                    }
-                }
-                if sent.elapsed() > Duration::from_secs(2) || done == total {
-                    self.out.send(Event::Vectors(Arc::new(self.vectors.clone())));
-                    self.out.send(Event::Analyzing { done, total });
-                    sent = Instant::now();
-                }
-            }
-            if done < total {
-                self.out.send(Event::Vectors(Arc::new(self.vectors.clone())));
-                self.out.send(Event::Analyzing { done: total, total });
-            }
-            eprintln!("radio: {done} analyzed");
-        }
-    }
-
-    fn diff(&mut self, library: &Library) -> Option<Vec<Todo>> {
-        let stamps = match self.db.lock().unwrap().stamps() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("radio: {e}");
-                return None;
-            }
-        };
-        let music = crate::library::music_dir();
-        let mut todo: Vec<Todo> = Vec::new();
-        let mut present: HashSet<&str> = HashSet::new();
-        let hearing = self.models.get().is_none_or(|m| m.is_some());
-        for (a, album) in library.albums.iter().enumerate() {
-            for (t, track) in album.tracks.iter().enumerate() {
-                present.insert(&track.uri);
-                let path = music.join(&track.uri);
-                let Some(stamp) = stamp_of(&path) else { continue };
-                let done = stamps.get(&track.uri).filter(|d| d.stamp == stamp).copied().unwrap_or(Done { stamp, bliss: false, voice: false });
-                let (bliss, voice) = (!done.bliss, !done.voice && hearing);
-                if bliss || voice {
-                    todo.push(Todo { album: a, track: t, path, stamp, bliss, voice });
-                }
-            }
-        }
-        let gone: Vec<String> = stamps.keys().filter(|u| !present.contains(u.as_str())).cloned().collect();
-        if !gone.is_empty() {
-            for u in &gone {
-                self.vectors.by_uri.remove(u);
-                self.vectors.voice.remove(u);
-                self.vectors.shape.remove(u);
-            }
-            self.out.send(Event::Vectors(Arc::new(self.vectors.clone())));
-        }
-        todo.reverse();
-        Some(todo)
-    }
-
-    fn store(&mut self, library: &Library, t: Todo, heard: Heard) {
-        let track = &library.albums[t.album].tracks[t.track];
-        if let Some(result) = heard.bliss {
-            if let Err(e) = &result {
-                eprintln!("radio: {}: {e}", track.uri);
-            }
-            if let Err(e) = self.db.lock().unwrap().write_analysis(&track.uri, t.stamp, &result) {
-                eprintln!("radio: {}: {e}", track.uri);
-            }
-            match result {
-                Ok((v, s)) => {
-                    self.vectors.by_uri.insert(track.uri.clone(), v);
-                    self.vectors.shape.insert(track.uri.clone(), s);
-                }
-                Err(_) => {
-                    self.vectors.by_uri.remove(&track.uri);
-                    self.vectors.shape.remove(&track.uri);
-                }
-            }
-        }
-        if let Some(result) = heard.voice {
-            if let Err(e) = &result {
-                eprintln!("radio: {}: voice: {e}", track.uri);
-            }
-            if let Err(e) = self.db.lock().unwrap().write_voice(&track.uri, t.stamp, &result) {
-                eprintln!("radio: {}: {e}", track.uri);
-            }
-            match result {
-                Ok(v) => {
-                    self.vectors.voice.insert(track.uri.clone(), v);
-                }
-                Err(_) => {
-                    self.vectors.voice.remove(&track.uri);
-                }
-            }
-        }
-    }
-
-    fn ask_links(&mut self, library: &Library) {
-        let names: HashSet<String> = library.artists.iter().map(|a| a.name.to_lowercase()).collect();
-        self.artists.retain(|n, _| names.contains(&n.to_lowercase()));
-        let linked: HashSet<String> = self.artists.keys().map(|n| n.to_lowercase()).collect();
-        let missing: Vec<(String, Vec<String>)> = library.artists.iter().filter(|a| !linked.contains(&a.name.to_lowercase())).map(|a| (a.name.clone(), a.mbids.clone())).collect();
-        self.linking = (0, missing.len());
-        self.out.send(Event::Linking { done: 0, total: missing.len() });
-        if !missing.is_empty() {
-            eprintln!("radio: {} artists to link", missing.len());
-            let _ = self.commands.send(crate::mpd::Command::Links(missing));
-        }
-        self.send_relations();
-    }
-
-    fn other(&mut self, job: Job) {
-        match job {
-            Job::Library(_) => {}
-            Job::Playlists(playlists) => {
-                if let Err(e) = self.db.lock().unwrap().write_playlists(&playlists) {
-                    eprintln!("radio: {e}");
-                }
-            }
-            Job::Origin { path, name, origin, url } => {
-                if let Err(e) = self.db.lock().unwrap().set_origin(&path, &name, &origin, url.as_deref()) {
-                    eprintln!("radio: {e}");
-                }
-            }
-            Job::Links { name, mbid, deezer, links, error } => {
-                if let Err(e) = self.db.lock().unwrap().write_links(&name, mbid.as_deref(), deezer, error.as_deref(), &links) {
-                    eprintln!("radio: {name}: {e}");
-                    return;
-                }
-                if error.is_none() {
-                    self.artists.insert(name, mbid);
-                }
-                self.linking.0 += 1;
-                self.out.send(Event::Linking { done: self.linking.0, total: self.linking.1.max(self.linking.0) });
-                self.send_relations();
-            }
-        }
-    }
-
-    fn send_relations(&self) {
-        match self.db.lock().unwrap().relations() {
-            Ok(rows) => {
-                self.out.send(Event::Relations(Arc::new(Relations::build(&rows))));
-            }
-            Err(e) => eprintln!("radio: {e}"),
-        }
-    }
-}
-
-fn stamp_of(path: &std::path::Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
-    Some(Stamp { mtime, size: meta.len() as i64 })
-}
-
-fn lowest_priority() {
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
-    }
-}
 
 /// What a difference on each feature is worth: its group's weight
 /// over the library's deviation, nothing where nothing varies.
@@ -586,17 +219,7 @@ fn shifted(centre: &Full, deltas: &Full, spread: &Full) -> Full {
     target
 }
 
-/// The pull's: see `path`.
-#[allow(dead_code)]
-fn seed_artists<'a>(library: &'a Library, seed: &'a Seed) -> Vec<&'a str> {
-    match seed {
-        Seed::Track(uri) => library.place(uri).map(|(a, _)| vec![library.albums[a].artist.as_str()]).unwrap_or_default(),
-        Seed::Album(key) => library.album_by_key(key).map(|a| vec![a.artist.as_str()]).unwrap_or_default(),
-        Seed::Artist(name) => vec![name.as_str()],
-    }
-}
-
-pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &Seed, queue: &[String], n: usize) -> Vec<String> {
+pub fn path(library: &Library, vectors: &Vectors, seed: &Seed, queue: &[String], n: usize) -> Vec<String> {
     let ceiling = vectors.vocality(library, seed);
     let quiet = |u: &str| fits(library, u) && ceiling.is_none_or(|c| vectors.voice.get(u).is_none_or(|v| v.mean <= c));
     let pool: Vec<(&str, Full, usize)> = match seed {
@@ -629,15 +252,6 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
     let centre = mean(&seeds);
     let spread = vectors.spread();
     let scale = scale(&spread);
-    // the pull of the artists' relations, a track of an artist linked to
-    // the seed's a third nearer than its sound says (`PULL` of the
-    // weight), is off for now: the track's analysis alone decides, until
-    // the relations are judged by ear. To turn it back on, with the
-    // members of the credits on both sides:
-    // let artists = seed_artists(library, seed);
-    // let pull = |i: usize| 1.0 - PULL * relations.weight(&library.albums[pool[i].2].artist, &artists);
-    let _ = relations;
-    let pull = |_: usize| 1.0;
     let mut excluded: HashSet<&str> = queue.iter().map(String::as_str).collect();
     if pool.iter().all(|(u, _, _)| excluded.contains(u)) {
         for keep in [10, 1, 0] {
@@ -654,7 +268,7 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
             .iter()
             .enumerate()
             .filter(|(_, (u, _, _))| !excluded.contains(u))
-            .map(|(i, (_, v, _))| (distance(&target, v, &scale) * pull(i), i))
+            .map(|(i, (_, v, _))| (distance(&target, v, &scale), i))
             .collect();
         if best.is_empty() {
             break;
@@ -682,6 +296,7 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db;
 
     fn library(albums: &[(&str, &str, usize)]) -> Library {
         Library::of(albums)
@@ -702,25 +317,24 @@ mod tests {
                 vectors.by_uri.insert(format!("{artist}/{}/{i}.ogg", artist.to_lowercase()), at(base + 0.1 * i as f32));
             }
         }
-        let relations = Relations::default();
         let seed = Seed::Track("A/a/1.ogg".into());
         let queue = opening(&lib, &seed);
         assert!(queue.is_empty(), "the seed is not forced in");
-        let path = path(&lib, &vectors, &relations, &seed, &queue, 8);
+        let path = path(&lib, &vectors, &seed, &queue, 8);
         assert_eq!(path.len(), 8, "eight of the nine, once each");
         let mut all = path.clone();
         all.sort();
         all.dedup();
         assert_eq!(all.len(), 8);
-        let first = (0..200).filter(|_| super::path(&lib, &vectors, &relations, &seed, &queue, 1)[0] == "A/a/1.ogg").count();
+        let first = (0..200).filter(|_| super::path(&lib, &vectors, &seed, &queue, 1)[0] == "A/a/1.ogg").count();
         assert!(first > 50 && first < 110, "the seed, nearest to itself, opens about four times in ten: {first} of 200");
-        let far = (0..200).filter(|_| super::path(&lib, &vectors, &relations, &seed, &queue, 1)[0].starts_with("C/")).count();
+        let far = (0..200).filter(|_| super::path(&lib, &vectors, &seed, &queue, 1)[0].starts_with("C/")).count();
         assert!(far < 40, "{far} of 200 went far");
         let mut whole: Vec<String> = queue.iter().cloned().chain(path).collect();
-        let last = super::path(&lib, &vectors, &relations, &seed, &whole, 3);
+        let last = super::path(&lib, &vectors, &seed, &whole, 3);
         assert_eq!(last.len(), 1, "the ninth and last, then nothing new");
         whole.extend(last);
-        assert_eq!(super::path(&lib, &vectors, &relations, &seed, &whole, 3).len(), 3, "all played, the radio goes round again");
+        assert_eq!(super::path(&lib, &vectors, &seed, &whole, 3).len(), 3, "all played, the radio goes round again");
     }
 
     #[test]
@@ -733,17 +347,16 @@ mod tests {
         for i in 1..=30 {
             vectors.by_uri.insert(format!("B/b/{i}.ogg"), at(1.0));
         }
-        let relations = Relations::default();
         let album = Seed::Album("A\u{1f}a".into());
         assert!(opening(&lib, &album).is_empty());
-        let path = path(&lib, &vectors, &relations, &album, &[], 5);
+        let path = path(&lib, &vectors, &album, &[], 5);
         assert_eq!(path.len(), 5);
         assert!(path.iter().all(|u| u.starts_with("A/") || u.starts_with("B/")));
         let artist = Seed::Artist("B".into());
         let open = opening(&lib, &artist);
         assert_eq!(open.len(), STEP);
         assert!(open.iter().all(|u| u.starts_with("B/")));
-        let more = super::path(&lib, &vectors, &relations, &artist, &open, STEP);
+        let more = super::path(&lib, &vectors, &artist, &open, STEP);
         assert_eq!(more.len(), 15, "the fifteen of B's left");
         assert!(more.iter().all(|u| u.starts_with("B/") && !open.contains(u)));
     }
@@ -757,14 +370,13 @@ mod tests {
             vectors.voice.insert(u.into(), Voice { mean: voice, share: voice });
         }
         vectors.by_uri.insert("D/d/1.ogg".into(), at(0.0));
-        let relations = Relations::default();
         let seed = Seed::Track("A/a/1.ogg".into());
         let queue = vec!["A/a/1.ogg".to_string()];
-        let mut path = path(&lib, &vectors, &relations, &seed, &queue, 5);
+        let mut path = path(&lib, &vectors, &seed, &queue, 5);
         path.sort();
         assert_eq!(path, vec!["C/c/1.ogg".to_string(), "D/d/1.ogg".to_string()]);
         let seed = Seed::Track("B/b/1.ogg".into());
-        assert_eq!(super::path(&lib, &vectors, &relations, &seed, &["B/b/1.ogg".to_string()], 5).len(), 3);
+        assert_eq!(super::path(&lib, &vectors, &seed, &["B/b/1.ogg".to_string()], 5).len(), 3);
     }
 
     #[test]
@@ -829,19 +441,12 @@ mod tests {
         let db = db::Db::open(&db::path()).unwrap();
         let vectors = db.vectors().unwrap();
         let conn = rusqlite::Connection::open(db::path()).unwrap();
-        let mut members: HashMap<String, Vec<crate::library::Member>> = HashMap::new();
-        let mut stmt = conn.prepare("select al.key, ar.name, ar.mbid from album_artist aa join album al on al.id = aa.album_id join artist ar on ar.id = aa.artist_id order by aa.position").unwrap();
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap() {
-            let (key, name, mbid) = row.unwrap();
-            members.entry(key).or_default().push(crate::library::Member { name, mbids: mbid.into_iter().collect() });
-        }
         let mut stmt = conn.prepare("select t.uri, t.title, al.title, al.credit, t.duration, al.key from track t join album al on al.id = t.album_id order by al.credit, al.title, t.disc, t.number").unwrap();
         let mut albums: Vec<Album> = Vec::new();
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<f64>>(4)?, r.get::<_, String>(5)?))).unwrap() {
             let (uri, title, album, artist, duration, key) = row.unwrap();
             if albums.last().is_none_or(|a| a.key != key) {
-                let members = members.remove(&key).unwrap_or_else(|| Album::whole(&artist, Vec::new()));
-                albums.push(Album { key, title: album.clone(), artist: artist.clone(), year: None, tracks: Vec::new(), loose: false, mbid: None, members });
+                albums.push(Album { key, title: album.clone(), artist: artist.clone(), year: None, tracks: Vec::new(), loose: false, mbid: None, members: Album::whole(&artist, Vec::new()) });
             }
             let a = albums.last_mut().unwrap();
             let number = a.tracks.len() as u64 + 1;
@@ -860,7 +465,6 @@ mod tests {
         assert!(!seeds.is_empty(), "no seed: {seed:?}");
         let centre = mean(&seeds);
         let spread = vectors.spread();
-        let relations = Relations::default();
         if std::env::var("ARC_SPREAD").is_ok() {
             // every feature: the library's mean, deviation and span, the seed's value, the largest shift of the arc in -1..1 units
             let names: Vec<String> = db::FEATURES.iter().map(|f| f.to_string()).chain(["voice".into(), "voiced".into()]).chain(shape::NAMES.iter().map(|f| f.to_string())).collect();
@@ -878,11 +482,11 @@ mod tests {
         if let Ok(runs) = std::env::var("ARC_RUNS").map(|r| r.parse::<usize>().unwrap()) {
             // where the seed track itself lands, over many arcs
             let Seed::Track(uri) = &seed else { panic!("ARC_RUNS wants a track") };
-            let mut at = vec![0; STEP + 1];
+            let mut at = [0; STEP + 1];
             // how far the chosen tracks miss their targets, rms in sd units, on the sound, the voice and the shape
             let (mut miss, mut n) = ([0f64; 3], 0usize);
             for _ in 0..runs {
-                let p = path(&library, &vectors, &relations, &seed, &[], STEP);
+                let p = path(&library, &vectors, &seed, &[], STEP);
                 at[p.iter().position(|u| u == uri).unwrap_or(STEP)] += 1;
                 for (i, u) in p.iter().enumerate() {
                     let (target, v) = (shifted(&centre, &shift(i), &spread), vectors.full(u).unwrap());
@@ -897,7 +501,7 @@ mod tests {
             println!("the miss, rms in sd: sound {:.2}  voice {:.2}  shape {:.2}", (miss[0] / n as f64).sqrt(), (miss[1] / n as f64).sqrt(), (miss[2] / n as f64).sqrt());
             return;
         }
-        let path = path(&library, &vectors, &relations, &seed, &[], STEP);
+        let path = path(&library, &vectors, &seed, &[], STEP);
         let columns: [(&str, usize); 8] = [("loud", 8), ("tempo", 0), ("major", 16), ("dim", 18), ("harm", HARMONY), ("pulse", PULSE), ("onset", ONSETS), ("rise", RISE)];
         println!("{:3} {:16} {:6} {}", "", "", "", columns.iter().map(|(n, _)| format!("{n:>6}")).collect::<String>());
         println!("{:3} {:16} {:6} {}", "", "seed", "", columns.iter().map(|(_, i)| format!("{:6.2}", centre[*i])).collect::<String>());
@@ -949,9 +553,8 @@ mod tests {
         for u in ["A/a/1.ogg", "B/b/1.ogg", "C/c/1.ogg"] {
             vectors.by_uri.insert(u.into(), at(0.0));
         }
-        let relations = Relations::default();
         let seed = Seed::Track("A/a/1.ogg".into());
-        let path = path(&lib, &vectors, &relations, &seed, &["A/a/1.ogg".to_string()], 5);
+        let path = path(&lib, &vectors, &seed, &["A/a/1.ogg".to_string()], 5);
         assert_eq!(path, vec!["C/c/1.ogg".to_string()], "B is too long, C just fits");
         let seed = Seed::Artist("B".into());
         assert!(opening(&lib, &seed).is_empty());
@@ -971,24 +574,4 @@ mod tests {
         assert_eq!(shift(STEP)[0], 0.0, "the next block starts over");
     }
 
-    #[test]
-    fn a_link_pulls() {
-        let lib = library(&[("A", "a", 1), ("B", "b", 1), ("C", "c", 1)]);
-        let mut vectors = Vectors::default();
-        vectors.by_uri.insert("A/a/1.ogg".into(), at(0.0));
-        vectors.by_uri.insert("B/b/1.ogg".into(), at(1.0));
-        vectors.by_uri.insert("C/c/1.ogg".into(), at(0.8));
-        let seed = Seed::Track("A/a/1.ogg".into());
-        let queue = vec!["A/a/1.ogg".to_string()];
-        let rows = vec![Relation { artist: "A".into(), other: "B".into(), source: "musicbrainz".into() }];
-        let relations = Relations::build(&rows);
-        assert_eq!(relations.weight("B", &["A"]), 1.0);
-        assert_eq!(relations.weight("A", &["B"]), 1.0);
-        assert_eq!(relations.weight("C", &["A"]), 0.0);
-        let mut firsts = HashSet::new();
-        for _ in 0..200 {
-            firsts.insert(path(&lib, &vectors, &relations, &seed, &queue, 1).remove(0));
-        }
-        assert!(firsts.contains("B/b/1.ogg"));
-    }
 }

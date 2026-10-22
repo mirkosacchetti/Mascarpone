@@ -109,8 +109,8 @@ KP_Subtract, KP_0. Every action and its default keys:
 ## Use
 
 Albums, Artists, Playlists and Queue in the header, which stays over
-every page; a click on a tab, even the one on, comes back to its list,
-dealt again (the keys below are the defaults: 1 to 4 or Ctrl+Tab
+every page; a click on a tab, even the one on, comes back to its list
+(the keys below are the defaults: 1 to 4 or Ctrl+Tab
 switch, Escape goes back a page; a mouse's back button does too, and
 its forward button returns to the page Back left). The tab lit is the page's kind: an
 album's page lights Albums whatever tab it was opened over, and Escape
@@ -119,11 +119,13 @@ artist's page and the queue have the same head on top, still (the
 cover or the portrait, the words beside it, an artist's scrolling on
 their own, the buttons at its foot on the right), and under it the tracks or the albums in a block that
 scrolls, down to the player; opened, the queue shows the song on in its
-middle. The album and artist grids come in a random order, dealt again
-by a click on their tab, by its key, and by Ctrl+R, which also
-refreshes: mpd updates its database and the library is read again. When mpd's
-database changes by itself (files synced in), the library is read again
-once it has been still for 30 minutes.
+middle. The album and artist grids come in a random order, dealt once
+when the library first comes and kept from then on, through tabs, pages
+and reloads; Ctrl+R deals them anew, and refreshes: mpd updates its
+database and the library is read again. When mpd's database changes by
+itself (files synced in), the library is read again once it has been
+still for 30 minutes, and the grids keep their order, the albums and
+artists gone dropped from it, the new ones shuffled in at the end.
 
 One card is selected: j and ; move it left and right, k and l down and
 up, Enter opens it, as does a click; the play button on an album's
@@ -197,22 +199,22 @@ box: there is no other font to fall back on.
 
 An album's artist is its album artist tag, else the artist's, the
 credit as written, and that is what the player bar and the picker show.
-The artists list, though, holds the artists the tags name one by one:
-`ALBUMARTISTS`, a value each, as beets and Picard write it from
-MusicBrainz's artist credit (`ARTISTS` when the file has no album
-artist), paired in order with the ids of `MUSICBRAINZ_ALBUMARTISTID`
-when there are as many. A credit splits only on those names, distinct,
-two or more: never on "&", "," or "/", which bands' names hold (Iggy &
-the Stooges; Emerson, Lake & Palmer); the tagger's guess for an album
-it could not match, the first name repeated, leaves the credit whole,
-one artist, to be asked about its members by id. Without ids, a credit
-joined with "; ", classical tagging's composer and performers, splits
-on the semicolons. The names are read from the file: mpd's
-`readcomments` for ogg and flac, the ID3 frames themselves for mp3,
-since mpd (0.24) reads a many-valued ID3v2.4 frame as its first value
-repeated. The database keeps the credit on the album and the artists
-it is credited to in `album_artist`, in order; the members of one
-credit are "credited with" each other.
+The artists list, though, holds the artists the credit names one by
+one, and that is the tags' doing entirely: a credit with several
+MusicBrainz ids (`MUSICBRAINZ_ALBUMARTISTID`, a value each, as beets
+and Picard write it from MusicBrainz's artist credit; mpd gives them
+in the tags' order) splits into the artists the database names for
+those ids, learnt from MusicBrainz the first time the credit's
+members were asked for; until every id is named the credit stays
+whole, one artist, and splits at the next library. Nothing splits on
+"&", "," or "/", which bands' names hold (Iggy & the Stooges; Emerson,
+Lake & Palmer); a credit without ids joined with "; ", classical
+tagging's composer and performers, splits on the semicolons. An album
+credited wrong or whole is tagged wrong: the files are where to fix
+it. Note that mpd (0.24) reads a many-valued ID3v2.4 frame as its
+first value alone, so an mp3's ids must be in an ID3v2.3 tag, joined
+by "/". The database keeps the credit on the album; the members of
+one credit are "credited with" each other.
 
 ## Artists from the net
 
@@ -266,7 +268,7 @@ shares whole), the same for a track in any library; the bounds are
 from a few dozen known tracks and `cargo test --release
 shape::tests::probe -- --ignored --nocapture` with `SHAPE_FILES`
 prints the shape of any files, raw and bounded, to see them against
-more. The analysis runs on a thread of its own at the lowest priority
+more. The analysis runs on the archive's thread at the lowest priority
 (`[radio] threads` files at a time, a quarter of the cores by default,
 the first time a few seconds after the window opens) after every load
 of the library, on the files new or changed since (by their
@@ -355,10 +357,8 @@ nearest to that shift, one of the six nearest, the nearer the likelier
 (by the square of the rank: the nearest four times in ten, the second
 three, the sixth once in ninety),
 never one already in the queue, never one longer than a quarter of an
-hour (a whole side, a live set). The artists' relations are gathered
-but not weighed, for now: the track's analysis alone decides (the
-pull, a track by an artist linked to the seed's a third nearer, is
-there commented in `src/radio.rs`). The distance is over bliss's 23 features, the two of the
+hour (a whole side, a live set). The artists have no say in it: the
+track's analysis alone decides. The distance is over bliss's 23 features, the two of the
 voice and the eight of the shape, each in -1..1: a song and an
 instrumental are far apart however alike they sound otherwise, a
 crescendo and a fade too; a track not shaped yet (an older version)
@@ -417,8 +417,12 @@ the queue as well.
 - `src/library.rs`: albums, tracks and artists built from mpd's
   `listallinfo`, and the playlists read from the m3u files.
 - `src/master.rs`: the queue's pointer, and the playlist files written.
-- `src/radio.rs`: the analysis thread (bliss on the files, the
-  artists' links asked of the net), the radio's path.
+- `src/archive.rs`: the thread that keeps the database: the library
+  written down as it loads, the analysis (bliss on the files, the voice
+  heard), the artists' links asked of the net, the vectors sent to
+  the app.
+- `src/radio.rs`: what a track is measured by, the arc and the radio's
+  path through the library: functions, no thread.
 - `src/db.rs`: the SQLite database: tracks with their analysis, artists,
   relations, albums, playlists.
 - `src/voice.rs`: the voice heard in a track, YAMNet and Essentia's head

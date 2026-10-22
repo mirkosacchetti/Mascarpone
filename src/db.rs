@@ -39,7 +39,7 @@ pub const FEATURES: [&str; N] = [
 
 pub const VERSION: i64 = bliss_audio::FeaturesVersion::LATEST as i64;
 
-const SCHEMA: i64 = 9;
+const SCHEMA: i64 = 10;
 
 const ALBUM_COLUMNS: &str = "
                 id integer primary key,
@@ -51,16 +51,6 @@ const ALBUM_COLUMNS: &str = "
                 loose integer not null default 0,
                 mbid text";
 
-/// The artists an album is credited to, in the credit's order: the
-/// members of a credit the tags split, else the credit itself.
-const ALBUM_ARTIST: &str = "
-            create table album_artist (
-                album_id integer not null references album (id) on delete cascade,
-                artist_id integer not null references artist (id),
-                position integer not null,
-                primary key (album_id, artist_id)
-            );
-            create index album_artist_artist on album_artist (artist_id);";
 
 pub fn path() -> PathBuf {
     crate::dirs::data().join("mascarpone").join("mascarpone.db")
@@ -89,10 +79,10 @@ pub struct Link {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct Relation {
     pub artist: String,
     pub other: String,
-    pub source: String,
 }
 
 pub type Shared = Arc<Mutex<Db>>;
@@ -168,12 +158,14 @@ impl Db {
                     "create table album_new ({ALBUM_COLUMNS});
                      insert into album_new (id, key, title, credit, year, folder, loose, mbid)
                          select al.id, al.key, al.title, ar.name, al.year, al.folder, al.loose, al.mbid from album al join artist ar on ar.id = al.artist_id;
-                     {ALBUM_ARTIST}
-                     insert into album_artist (album_id, artist_id, position) select id, artist_id, 0 from album;
                      drop table album;
                      alter table album_new rename to album;"
                 ))?;
                 self.conn.pragma_update(None, "foreign_keys", "on")?;
+            }
+            if version < 10 {
+                // the artists an album is credited to are the library's, in memory, from the tags' ids
+                self.conn.execute_batch("drop table if exists album_artist")?;
             }
             self.conn.pragma_update(None, "user_version", SCHEMA)?;
             return Ok(());
@@ -200,7 +192,6 @@ impl Db {
             create index artist_mbid on artist (mbid);
             create index artist_deezer on artist (deezer_id);
             create table album ({ALBUM_COLUMNS});
-            {ALBUM_ARTIST}
             create table track (
                 id integer primary key,
                 uri text not null unique,
@@ -302,8 +293,6 @@ impl Db {
                 "insert into album (key, title, credit, year, folder, loose, mbid) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  on conflict (key) do update set title = excluded.title, credit = excluded.credit, year = excluded.year, folder = excluded.folder, loose = excluded.loose, mbid = excluded.mbid",
             )?;
-            let mut clear_members = tx.prepare_cached("delete from album_artist where album_id = (select id from album where key = ?1)")?;
-            let mut member = tx.prepare_cached("insert or ignore into album_artist (album_id, artist_id, position) values ((select id from album where key = ?1), (select id from artist where name = ?2), ?3)")?;
             // the members of one credit are credited with each other,
             // both ways, for the radio to hear them near: written anew
             // at every library, as the tags are
@@ -320,9 +309,7 @@ impl Db {
                 let folder = Path::new(&a.tracks[0].uri).parent().map(|p| p.to_string_lossy().into_owned());
                 album.execute(params![a.key, a.title, a.artist, a.year, folder, a.loose as i64, a.mbid])?;
                 keep_album.execute(params![a.key])?;
-                clear_members.execute(params![a.key])?;
-                for (position, m) in a.members.iter().enumerate() {
-                    member.execute(params![a.key, m.name, position as i64])?;
+                for m in &a.members {
                     for other in &a.members {
                         if other.name != m.name {
                             credited.execute(params![m.name, other.name])?;
@@ -345,7 +332,6 @@ impl Db {
         // credit split since or an album gone, has nothing left to say
         tx.execute(
             "delete from artist where in_library = 0
-                and id not in (select artist_id from album_artist)
                 and id not in (select artist_id from track where artist_id is not null)
                 and id not in (select artist_id from relation)
                 and id not in (select other_id from relation)",
@@ -456,6 +442,14 @@ impl Db {
         Ok(stmt.query_row(params![name], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
+    /// Every artist's name by its MusicBrainz id, the library's own
+    /// first where two rows share one: what a credit's ids name.
+    pub fn names_by_mbid(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare("select mbid, name from artist where mbid is not null order by in_library")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn artist_info(&self, name: &str) -> Result<Option<Info>> {
         let mut stmt = self.conn.prepare_cached("select bio, wikipedia, portrait from artist where name = ?1 and info_fetched is not null")?;
         Ok(stmt.query_row(params![name], |r| Ok(Info { bio: r.get(0)?, wikipedia: r.get(1)?, portrait: r.get::<_, i64>(2)? != 0 })).optional()?)
@@ -511,11 +505,12 @@ impl Db {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn relations(&self) -> Result<Vec<Relation>> {
         let mut stmt = self.conn.prepare(
-            "select a.name, b.name, r.source from relation r join artist a on a.id = r.artist_id join artist b on b.id = r.other_id where a.in_library = 1 and b.in_library = 1",
+            "select a.name, b.name from relation r join artist a on a.id = r.artist_id join artist b on b.id = r.other_id where a.in_library = 1 and b.in_library = 1",
         )?;
-        let rows = stmt.query_map([], |r| Ok(Relation { artist: r.get(0)?, other: r.get(1)?, source: r.get(2)? }))?;
+        let rows = stmt.query_map([], |r| Ok(Relation { artist: r.get(0)?, other: r.get(1)? }))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }
@@ -552,8 +547,6 @@ fn merge_artist(conn: &Connection, from: i64, into: i64) -> Result<()> {
     conn.execute("update or ignore relation set artist_id = ?2 where artist_id = ?1", params![from, into])?;
     conn.execute("update or ignore relation set other_id = ?2 where other_id = ?1", params![from, into])?;
     conn.execute("delete from relation where artist_id = ?1 or other_id = ?1 or artist_id = other_id", params![from])?;
-    conn.execute("update or ignore album_artist set artist_id = ?2 where artist_id = ?1", params![from, into])?;
-    conn.execute("delete from album_artist where artist_id = ?1", params![from])?;
     conn.execute("update track set artist_id = ?2 where artist_id = ?1", params![from, into])?;
     conn.execute(
         "update artist set
@@ -651,8 +644,7 @@ mod tests {
         db.conn.pragma_update(None, "foreign_keys", "off").unwrap();
         db.conn
             .execute_batch(
-                "drop table album_artist;
-                 create table album_v8 (id integer primary key, key text not null unique, title text not null, artist_id integer not null references artist (id), year text, folder text, loose integer not null default 0, mbid text);
+                "create table album_v8 (id integer primary key, key text not null unique, title text not null, artist_id integer not null references artist (id), year text, folder text, loose integer not null default 0, mbid text);
                  insert into album_v8 select id, key, title, (select id from artist where name = credit), year, folder, loose, mbid from album;
                  drop table album;
                  alter table album_v8 rename to album;",
@@ -755,11 +747,11 @@ mod tests {
         assert!(lib.albums[nico].split(&["The Velvet Underground".into(), "Nico".into()]));
         let lib = Library::assemble(std::mem::take(&mut lib.albums));
         db.write_library(&lib).unwrap();
-        let members: Vec<(String, i64)> = {
-            let mut stmt = db.conn.prepare("select ar.name, aa.position from album_artist aa join album al on al.id = aa.album_id join artist ar on ar.id = aa.artist_id where al.credit = 'The Velvet Underground & Nico' order by aa.position").unwrap();
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap()
-        };
-        assert_eq!(members, [("The Velvet Underground".to_string(), 0), ("Nico".to_string(), 1)]);
+        let credit: String = db.conn.query_row("select credit from album where title = 'The Velvet Underground & Nico'", [], |r| r.get(0)).unwrap();
+        assert_eq!(credit, "The Velvet Underground & Nico");
+        let names = db.names_by_mbid().unwrap();
+        assert_eq!(names.get("vu").map(String::as_str), Some("The Velvet Underground"));
+        assert_eq!(names.get("nico").map(String::as_str), Some("Nico"));
         let in_library: i64 = db.conn.query_row("select count(*) from artist where in_library = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(in_library, 2, "the members, not the credit");
         assert_eq!(db.artist_mbid("Nico").unwrap().as_deref(), Some("nico"));
@@ -790,8 +782,6 @@ mod tests {
         db.prepare().unwrap();
         let credit: String = db.conn.query_row("select credit from album", [], |r| r.get(0)).unwrap();
         assert_eq!(credit, "Can");
-        let member: String = db.conn.query_row("select ar.name from album_artist aa join artist ar on ar.id = aa.artist_id", [], |r| r.get(0)).unwrap();
-        assert_eq!(member, "Can");
         let tracks: i64 = db.conn.query_row("select count(*) from track where album_id is not null", [], |r| r.get(0)).unwrap();
         assert_eq!(tracks, 2, "the tracks still point to their album");
         assert_eq!(db.vectors().unwrap().by_uri.len(), 1);
@@ -807,12 +797,7 @@ mod tests {
         let db = Db::open(&path).unwrap();
         let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         let count = |sql: &str| db.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
-        println!("version {version}: {} albums, {} members, {} tracks in albums, {} analyzed, {} artists in library, {} relations", count("select count(*) from album"), count("select count(*) from album_artist"), count("select count(*) from track where album_id is not null"), count("select count(*) from track where version is not null"), count("select count(*) from artist where in_library = 1"), count("select count(*) from relation"));
-        let mut stmt = db.conn.prepare("select al.credit, ar.name from album_artist aa join album al on al.id = aa.album_id join artist ar on ar.id = aa.artist_id where al.credit like '%Nico%' order by al.credit, aa.position").unwrap();
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap() {
-            let (credit, member) = row.unwrap();
-            println!("{credit} | {member}");
-        }
+        println!("version {version}: {} albums, {} tracks in albums, {} analyzed, {} artists in library, {} named by id, {} relations", count("select count(*) from album"), count("select count(*) from track where album_id is not null"), count("select count(*) from track where version is not null"), count("select count(*) from artist where in_library = 1"), count("select count(*) from artist where mbid is not null"), count("select count(*) from relation"));
         assert_eq!(db.conn.query_row("pragma foreign_key_check", [], |r| r.get::<_, String>(0)).optional().unwrap(), None, "foreign keys hold");
     }
 
