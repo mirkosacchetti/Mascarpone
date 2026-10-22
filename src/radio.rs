@@ -23,7 +23,7 @@ pub const ARCS: usize = 3;
 const NEAREST: usize = 6;
 const PER_PART: usize = STEP / ARC.len();
 const LONGEST: Duration = Duration::from_secs(15 * 60);
-const PULL: f32 = 0.35;
+// const PULL: f32 = 0.35;
 /// How long after the start the analysis waits: the window, the
 /// library and the covers come first, on a quiet machine.
 const SETTLE: Duration = Duration::from_secs(5);
@@ -35,8 +35,14 @@ pub struct Vectors {
     pub shape: HashMap<String, Shape>,
 }
 
-const VOICE_WEIGHT: f32 = 1.0;
-const SHAPE_WEIGHT: f32 = 1.0;
+/// The distance is in standard deviations of the library on every
+/// feature, each capped at `CAP` (a feature the library hardly
+/// spans would otherwise tell everything), and each group weighted:
+/// bliss's 23 of the sound, the 2 of the voice, the 8 of the shape.
+const SOUND_WEIGHT: f32 = 1.0;
+const VOICE_WEIGHT: f32 = 0.5;
+const SHAPE_WEIGHT: f32 = 0.75;
+const CAP: f32 = 3.0;
 
 /// The whole of a track as the radio measures it: bliss's vector,
 /// the two of the voice, the eight of the shape.
@@ -50,13 +56,11 @@ fn full(vector: &Vector, voice: Option<&Voice>, shape: Option<&Shape>) -> Full {
     let mut f = [0f32; F];
     f[..N].copy_from_slice(vector);
     if let Some(v) = voice {
-        f[VOICE] = (2.0 * v.mean - 1.0) * VOICE_WEIGHT;
-        f[VOICE + 1] = (2.0 * v.share - 1.0) * VOICE_WEIGHT;
+        f[VOICE] = 2.0 * v.mean - 1.0;
+        f[VOICE + 1] = 2.0 * v.share - 1.0;
     }
     if let Some(s) = shape {
-        for (i, x) in s.iter().enumerate() {
-            f[SHAPE + i] = x * SHAPE_WEIGHT;
-        }
+        f[SHAPE..].copy_from_slice(s);
     }
     f
 }
@@ -97,6 +101,8 @@ impl Relations {
         relations
     }
 
+    /// The pull's: see `path`.
+    #[allow(dead_code)]
     fn weight(&self, artist: &str, to: &[&str]) -> f32 {
         let Some(links) = self.by_artist.get(&artist.to_lowercase()) else { return 0.0 };
         to.iter().filter_map(|a| links.get(&a.to_lowercase())).copied().fold(0.0, f32::max)
@@ -429,8 +435,25 @@ fn lowest_priority() {
     }
 }
 
-fn distance(a: &Full, b: &Full) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+/// What a difference on each feature is worth: its group's weight
+/// over the library's deviation, nothing where nothing varies.
+fn scale(spread: &Full) -> Full {
+    let mut s = [0f32; F];
+    for (i, x) in s.iter_mut().enumerate() {
+        let weight = match i {
+            ..VOICE => SOUND_WEIGHT,
+            VOICE..SHAPE => VOICE_WEIGHT,
+            _ => SHAPE_WEIGHT,
+        };
+        if spread[i] > 0.0 {
+            *x = weight / spread[i];
+        }
+    }
+    s
+}
+
+fn distance(a: &Full, b: &Full, scale: &Full) -> f32 {
+    a.iter().zip(b).zip(scale).map(|((x, y), s)| (((x - y) * s).abs().min(CAP)).powi(2)).sum::<f32>().sqrt()
 }
 
 fn mean(vs: &[Full]) -> Full {
@@ -476,8 +499,8 @@ impl Vectors {
         for i in 0..F {
             let xs: Vec<f32> = match i {
                 ..VOICE => self.by_uri.values().map(|v| v[i]).collect(),
-                VOICE..SHAPE => self.voice.values().map(|v| (2.0 * if i == VOICE { v.mean } else { v.share } - 1.0) * VOICE_WEIGHT).collect(),
-                _ => self.shape.values().map(|v| v[i - SHAPE] * SHAPE_WEIGHT).collect(),
+                VOICE..SHAPE => self.voice.values().map(|v| 2.0 * if i == VOICE { v.mean } else { v.share } - 1.0).collect(),
+                _ => self.shape.values().map(|v| v[i - SHAPE]).collect(),
             };
             if xs.is_empty() {
                 continue;
@@ -521,14 +544,25 @@ const PULSE: usize = SHAPE + shape::PULSE;
 const ONSETS: usize = SHAPE + shape::ONSETS;
 
 /// The five parts of the arc: each a shift of the seed along bliss's
-/// features (by index), the voice's and the shape's, in standard
-/// deviations of the library; the equilibrium is the seed itself.
+/// features (by index: 0 tempo, 1 zcr, 2-7 the mean and deviation of
+/// centroid, rolloff and flatness, 8-9 of loudness, 16-19 the major,
+/// minor, diminished and augmented triads), the voice's and the
+/// shape's, in standard deviations of the library. The equilibrium is
+/// the seed itself; the break a first dissonance, a dirtied timbre,
+/// the loudness and the pulse broken, the repetition too; the
+/// adventure the longest unrest, a key that keeps moving, chromatic
+/// bridges, layers and registers, loudness in waves, the pulse put to
+/// the test, the motif varied; the climax the densest and loudest,
+/// the tension sustained (far from the key, still), the pulse at its
+/// thickest, a motif hammered, and the victory an arch that resolves
+/// in the major; the new equilibrium the home key again, the major,
+/// lighter and cleaner, quieter, steady, the repetition of the start.
 const ARC: [(&str, &[(usize, f32)]); 5] = [
     ("equilibrium", &[]),
-    ("break", &[(3, 0.75), (5, 0.75), (7, 0.5), (9, 0.75), (16, -0.5), (17, 0.75), (18, 0.5), (CHANGES, 0.75), (SECTIONS, 0.5), (HARMONY, 0.75), (PULSE, -0.5), (ARCH, -0.5)]),
-    ("adventure", &[(0, 1.0), (1, 0.75), (2, 1.0), (4, 1.0), (8, 1.0), (9, 0.75), (17, 0.5), (VOICE, 0.75), (VOICE + 1, 0.75), (RISE, 0.75), (SECTIONS, 0.75), (ONSETS, 0.75), (HARMONY, 0.5), (REPETITION, -0.75)]),
-    ("resolution", &[(8, 0.75), (9, 0.5), (16, 1.0), (17, -0.75), (18, -0.5), (ARCH, 0.75), (REPETITION, 0.5), (CHANGES, -0.5), (RISE, -0.5)]),
-    ("new equilibrium", &[(0, -1.0), (1, -0.75), (2, -1.0), (4, -1.0), (6, -0.5), (8, -1.0), (9, -0.75), (16, 0.5), (VOICE, -0.75), (VOICE + 1, -0.75), (RISE, -0.75), (ONSETS, -0.75), (CHANGES, -0.5), (SECTIONS, -0.5), (REPETITION, 0.5), (PULSE, 0.5)]),
+    ("break", &[(18, 0.75), (19, 0.25), (17, 0.5), (16, -0.5), (HARMONY, 0.5), (CHANGES, 0.5), (6, 0.5), (1, 0.25), (9, 0.75), (ARCH, -0.5), (PULSE, -0.75), (REPETITION, -0.5), (SECTIONS, 0.5)]),
+    ("adventure", &[(HARMONY, 0.75), (CHANGES, 0.75), (18, 0.5), (19, 0.5), (16, -0.25), (3, 0.75), (5, 0.5), (4, 0.5), (RISE, 0.75), (9, 0.5), (0, 0.5), (ONSETS, 0.5), (PULSE, -0.25), (REPETITION, -0.5), (SECTIONS, 0.75), (VOICE, 0.5), (VOICE + 1, 0.5)]),
+    ("climax", &[(8, 1.0), (2, 0.75), (4, 0.75), (1, 0.5), (6, 0.25), (HARMONY, 0.75), (CHANGES, -0.25), (18, 0.5), (19, 0.25), (16, 0.25), (0, 0.75), (ONSETS, 1.0), (PULSE, 0.5), (REPETITION, 0.5), (ARCH, 0.75), (9, 0.5)]),
+    ("new equilibrium", &[(HARMONY, -0.75), (16, 0.75), (17, -0.5), (18, -0.75), (19, -0.5), (6, -0.5), (3, -0.5), (4, -0.25), (8, -0.75), (RISE, -0.5), (9, -0.75), (PULSE, 0.5), (ONSETS, -0.5), (0, -0.5), (REPETITION, 0.75), (SECTIONS, -0.5), (CHANGES, -0.75), (VOICE, -0.5), (VOICE + 1, -0.5)]),
 ];
 
 fn shift(at: usize) -> Full {
@@ -552,6 +586,8 @@ fn shifted(centre: &Full, deltas: &Full, spread: &Full) -> Full {
     target
 }
 
+/// The pull's: see `path`.
+#[allow(dead_code)]
 fn seed_artists<'a>(library: &'a Library, seed: &'a Seed) -> Vec<&'a str> {
     match seed {
         Seed::Track(uri) => library.place(uri).map(|(a, _)| vec![library.albums[a].artist.as_str()]).unwrap_or_default(),
@@ -592,7 +628,16 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
     }
     let centre = mean(&seeds);
     let spread = vectors.spread();
-    let artists = seed_artists(library, seed);
+    let scale = scale(&spread);
+    // the pull of the artists' relations, a track of an artist linked to
+    // the seed's a third nearer than its sound says (`PULL` of the
+    // weight), is off for now: the track's analysis alone decides, until
+    // the relations are judged by ear. To turn it back on, with the
+    // members of the credits on both sides:
+    // let artists = seed_artists(library, seed);
+    // let pull = |i: usize| 1.0 - PULL * relations.weight(&library.albums[pool[i].2].artist, &artists);
+    let _ = relations;
+    let pull = |_: usize| 1.0;
     let mut excluded: HashSet<&str> = queue.iter().map(String::as_str).collect();
     if pool.iter().all(|(u, _, _)| excluded.contains(u)) {
         for keep in [10, 1, 0] {
@@ -609,14 +654,15 @@ pub fn path(library: &Library, vectors: &Vectors, relations: &Relations, seed: &
             .iter()
             .enumerate()
             .filter(|(_, (u, _, _))| !excluded.contains(u))
-            .map(|(i, (_, v, a))| (distance(&target, v) * (1.0 - PULL * relations.weight(&library.albums[*a].artist, &artists)), i))
+            .map(|(i, (_, v, _))| (distance(&target, v, &scale) * pull(i), i))
             .collect();
         if best.is_empty() {
             break;
         }
         best.sort_by(|x, y| x.0.total_cmp(&y.0));
         best.truncate(NEAREST);
-        let weights: Vec<usize> = (0..best.len()).map(|r| NEAREST - r).collect();
+        // the squares: the nearest two in three, the sixth once in ninety
+        let weights: Vec<usize> = (0..best.len()).map(|r| (NEAREST - r).pow(2)).collect();
         let mut pick = fastrand::usize(..weights.iter().sum::<usize>());
         let mut chosen = 0;
         for (r, w) in weights.iter().enumerate() {
@@ -667,7 +713,7 @@ mod tests {
         all.dedup();
         assert_eq!(all.len(), 8);
         let first = (0..200).filter(|_| super::path(&lib, &vectors, &relations, &seed, &queue, 1)[0] == "A/a/1.ogg").count();
-        assert!(first > 30 && first < 90, "the seed, nearest to itself, opens about three times in ten: {first} of 200");
+        assert!(first > 50 && first < 110, "the seed, nearest to itself, opens about four times in ten: {first} of 200");
         let far = (0..200).filter(|_| super::path(&lib, &vectors, &relations, &seed, &queue, 1)[0].starts_with("C/")).count();
         assert!(far < 40, "{far} of 200 went far");
         let mut whole: Vec<String> = queue.iter().cloned().chain(path).collect();
@@ -750,10 +796,119 @@ mod tests {
         assert!(shift(eq).iter().all(|x| *x == 0.0), "the equilibrium is the seed itself");
         assert!(shift(brk)[CHANGES] > 0.0 && shift(brk)[PULSE] < 0.0, "the break: the harmony moves, the pulse loosens");
         assert!(shift(adv)[RISE] > 0.0 && shift(adv)[ONSETS] > 0.0 && shift(adv)[REPETITION] < 0.0, "the adventure: a crescendo, dense, through-composed");
-        assert!(shift(res)[ARCH] > 0.0 && shift(res)[RISE] < 0.0, "the resolution: an arch that comes down");
-        assert!(shift(new)[RISE] < 0.0 && shift(new)[PULSE] > 0.0, "the new equilibrium: fading, steady");
+        assert!(shift(res)[ARCH] > 0.0 && shift(res)[HARMONY] > 0.0 && shift(res)[CHANGES] < 0.0, "the climax: tension sustained, an arch that resolves");
+        assert!(shift(brk)[HARMONY] > 0.0 && shift(brk)[CHANGES] > 0.0, "the break: a dissonance that moves on");
+        assert!(shift(new)[RISE] < 0.0 && shift(new)[PULSE] > 0.0 && shift(new)[HARMONY] < 0.0, "the new equilibrium: fading, steady, home");
         for at in 0..STEP {
             assert!(shift(at).iter().all(|x| x.abs() <= 1.0));
+        }
+    }
+
+    #[test]
+    fn the_arc_is_well_formed() {
+        for (name, shifts) in ARC {
+            let mut seen = HashSet::new();
+            for &(i, d) in shifts {
+                assert!(i < F, "{name}: feature {i} is beyond the vector");
+                assert!(seen.insert(i), "{name}: feature {i} shifted twice");
+                assert!(d != 0.0 && d.abs() <= 1.0, "{name}: feature {i} shifted by {d}");
+            }
+        }
+        assert_eq!(ARC.len() * PER_PART, STEP, "the parts fill the arc exactly");
+    }
+
+    /// `ARC_SEED=<uri> cargo test --release radio::tests::arc_probe -- --ignored --nocapture`
+    /// builds an arc from the library in the database, from the seed
+    /// (a track's uri; an album's key; an artist's name), and prints
+    /// each track with its part, the target and its own values on a
+    /// few features, to see the arc rise and fall.
+    #[test]
+    #[ignore]
+    fn arc_probe() {
+        use crate::library::{Album, Track};
+        let db = db::Db::open(&db::path()).unwrap();
+        let vectors = db.vectors().unwrap();
+        let conn = rusqlite::Connection::open(db::path()).unwrap();
+        let mut members: HashMap<String, Vec<crate::library::Member>> = HashMap::new();
+        let mut stmt = conn.prepare("select al.key, ar.name, ar.mbid from album_artist aa join album al on al.id = aa.album_id join artist ar on ar.id = aa.artist_id order by aa.position").unwrap();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap() {
+            let (key, name, mbid) = row.unwrap();
+            members.entry(key).or_default().push(crate::library::Member { name, mbids: mbid.into_iter().collect() });
+        }
+        let mut stmt = conn.prepare("select t.uri, t.title, al.title, al.credit, t.duration, al.key from track t join album al on al.id = t.album_id order by al.credit, al.title, t.disc, t.number").unwrap();
+        let mut albums: Vec<Album> = Vec::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<f64>>(4)?, r.get::<_, String>(5)?))).unwrap() {
+            let (uri, title, album, artist, duration, key) = row.unwrap();
+            if albums.last().is_none_or(|a| a.key != key) {
+                let members = members.remove(&key).unwrap_or_else(|| Album::whole(&artist, Vec::new()));
+                albums.push(Album { key, title: album.clone(), artist: artist.clone(), year: None, tracks: Vec::new(), loose: false, mbid: None, members });
+            }
+            let a = albums.last_mut().unwrap();
+            let number = a.tracks.len() as u64 + 1;
+            a.tracks.push(Track { uri, title: title.unwrap_or_default(), artist, disc: 1, number, duration: duration.map(Duration::from_secs_f64), mbid: None });
+        }
+        let library = Library::assemble(albums);
+        let seed = std::env::var("ARC_SEED").unwrap_or_default();
+        let seed = if library.place(&seed).is_some() {
+            Seed::Track(seed)
+        } else if library.album_by_key(&seed).is_some() {
+            Seed::Album(seed)
+        } else {
+            Seed::Artist(seed)
+        };
+        let seeds = seed_vectors(&library, &vectors, &seed);
+        assert!(!seeds.is_empty(), "no seed: {seed:?}");
+        let centre = mean(&seeds);
+        let spread = vectors.spread();
+        let relations = Relations::default();
+        if std::env::var("ARC_SPREAD").is_ok() {
+            // every feature: the library's mean, deviation and span, the seed's value, the largest shift of the arc in -1..1 units
+            let names: Vec<String> = db::FEATURES.iter().map(|f| f.to_string()).chain(["voice".into(), "voiced".into()]).chain(shape::NAMES.iter().map(|f| f.to_string())).collect();
+            let fulls: Vec<Full> = vectors.by_uri.keys().filter_map(|u| vectors.full(u)).collect();
+            println!("{:24} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}", "feature", "mean", "sd", "min", "max", "seed", "shift");
+            for i in 0..F {
+                let xs: Vec<f32> = fulls.iter().map(|f| f[i]).collect();
+                let mean = xs.iter().sum::<f32>() / xs.len() as f32;
+                let (min, max) = xs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+                let largest = ARC.iter().flat_map(|(_, s)| s.iter()).filter(|(j, _)| *j == i).map(|(_, d)| d.abs()).fold(0.0, f32::max);
+                println!("{:24} {mean:7.2} {:7.2} {min:7.2} {max:7.2} {:7.2} {:7.2}", names[i], spread[i], centre[i], largest * spread[i]);
+            }
+            return;
+        }
+        if let Ok(runs) = std::env::var("ARC_RUNS").map(|r| r.parse::<usize>().unwrap()) {
+            // where the seed track itself lands, over many arcs
+            let Seed::Track(uri) = &seed else { panic!("ARC_RUNS wants a track") };
+            let mut at = vec![0; STEP + 1];
+            // how far the chosen tracks miss their targets, rms in sd units, on the sound, the voice and the shape
+            let (mut miss, mut n) = ([0f64; 3], 0usize);
+            for _ in 0..runs {
+                let p = path(&library, &vectors, &relations, &seed, &[], STEP);
+                at[p.iter().position(|u| u == uri).unwrap_or(STEP)] += 1;
+                for (i, u) in p.iter().enumerate() {
+                    let (target, v) = (shifted(&centre, &shift(i), &spread), vectors.full(u).unwrap());
+                    for (g, range) in [0..VOICE, VOICE..SHAPE, SHAPE..F].into_iter().enumerate() {
+                        let k = range.len();
+                        miss[g] += range.filter(|j| spread[*j] > 0.0).map(|j| ((target[j] - v[j]) / spread[j]).powi(2) as f64).sum::<f64>() / k as f64;
+                    }
+                    n += 1;
+                }
+            }
+            println!("the seed at: {}", at.iter().enumerate().map(|(i, n)| format!("{i}:{n} ")).collect::<String>());
+            println!("the miss, rms in sd: sound {:.2}  voice {:.2}  shape {:.2}", (miss[0] / n as f64).sqrt(), (miss[1] / n as f64).sqrt(), (miss[2] / n as f64).sqrt());
+            return;
+        }
+        let path = path(&library, &vectors, &relations, &seed, &[], STEP);
+        let columns: [(&str, usize); 8] = [("loud", 8), ("tempo", 0), ("major", 16), ("dim", 18), ("harm", HARMONY), ("pulse", PULSE), ("onset", ONSETS), ("rise", RISE)];
+        println!("{:3} {:16} {:6} {}", "", "", "", columns.iter().map(|(n, _)| format!("{n:>6}")).collect::<String>());
+        println!("{:3} {:16} {:6} {}", "", "seed", "", columns.iter().map(|(_, i)| format!("{:6.2}", centre[*i])).collect::<String>());
+        for (at, uri) in path.iter().enumerate() {
+            let part = ARC[(at / PER_PART) % ARC.len()].0;
+            let target = shifted(&centre, &shift(at), &spread);
+            let v = vectors.full(uri).unwrap();
+            let (a, t) = library.place(uri).unwrap();
+            let track = &library.albums[a].tracks[t];
+            println!("{at:3} {:16} target {}", part, columns.iter().map(|(_, i)| format!("{:6.2}", target[*i])).collect::<String>());
+            println!("{:3} {:16} {:6.2} {}  {} - {}", "", "", distance(&target, &v, &scale(&spread)), columns.iter().map(|(_, i)| format!("{:6.2}", v[*i])).collect::<String>(), track.artist, track.title);
         }
     }
 
@@ -771,10 +926,16 @@ mod tests {
         vectors.shape.insert("B/b/1.ogg".into(), rising);
         vectors.shape.insert("C/c/1.ogg".into(), falling);
         let (a, b, c) = (vectors.full("A/a/1.ogg").unwrap(), vectors.full("B/b/1.ogg").unwrap(), vectors.full("C/c/1.ogg").unwrap());
-        assert_eq!(distance(&a, &b), 0.0, "B rises like A");
-        assert_eq!(distance(&a, &c), 2.0 * SHAPE_WEIGHT, "C falls");
+        let scale = scale(&vectors.spread());
+        assert_eq!(distance(&a, &b, &scale), 0.0, "B rises like A");
+        let sd = vectors.spread()[RISE];
+        assert!((distance(&a, &c, &scale) - 2.0 / sd * SHAPE_WEIGHT).abs() < 1e-5, "C falls: two rises apart, in the library's deviations, by the shape's weight");
         let none = full(&at(0.0), None, None);
-        assert_eq!(distance(&a, &none), SHAPE_WEIGHT, "a track not shaped yet is halfway from either");
+        assert!((distance(&a, &none, &scale) - 1.0 / sd * SHAPE_WEIGHT).abs() < 1e-5, "a track not shaped yet is halfway from either");
+        let mut far = [0f32; F];
+        far[RISE] = 100.0;
+        assert_eq!(distance(&a, &far, &scale), CAP, "no farther than the cap on one feature");
+        assert_eq!(scale[0], 0.0, "a feature the library does not span counts nothing");
     }
 
     #[test]
@@ -799,11 +960,14 @@ mod tests {
     #[test]
     fn a_part_passes_into_the_next_a_third_a_track() {
         assert_eq!(PER_PART, 3);
+        let of = |part: usize, i: usize| ARC[part].1.iter().filter(|(j, _)| *j == i).map(|(_, d)| d).sum::<f32>();
+        let (brk, adv, new) = (of(1, 0), of(2, 0), of(4, 0));
+        assert!(brk == 0.0 && adv > 0.0 && new < 0.0, "the tempo: untouched by the break, up in the adventure, down at the end");
         let adventure = 2 * PER_PART;
-        assert_eq!(shift(adventure)[0], 1.0, "the first track of the adventure is all adventure");
-        assert!((shift(adventure - 2)[0] - 1.0 / 3.0).abs() < 1e-6, "a third through the break, a third of the way to the adventure");
-        assert!((shift(adventure - 1)[0] - 2.0 / 3.0).abs() < 1e-6);
-        assert!((shift(STEP - 1)[0] + 1.0 / 3.0).abs() < 1e-6, "the last track, nearly back at the equilibrium");
+        assert_eq!(shift(adventure)[0], adv, "the first track of the adventure is all adventure");
+        assert!((shift(adventure - 2)[0] - adv / 3.0).abs() < 1e-6, "a third through the break, a third of the way to the adventure");
+        assert!((shift(adventure - 1)[0] - 2.0 * adv / 3.0).abs() < 1e-6);
+        assert!((shift(STEP - 1)[0] - new / 3.0).abs() < 1e-6, "the last track, nearly back at the equilibrium");
         assert_eq!(shift(STEP)[0], 0.0, "the next block starts over");
     }
 

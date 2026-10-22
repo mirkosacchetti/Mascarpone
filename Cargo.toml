@@ -20,6 +20,7 @@ fastrand = "2"
 bliss-audio = { path = "vendor/bliss-rs", default-features = false, features = ["symphonia-all"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tract-onnx = "0.21"
+id3 = "1"
 
 [profile.release]
 opt-level = 2

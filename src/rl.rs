@@ -77,6 +77,10 @@ pub const FLAG_MSAA_4X_HINT: c_uint = 0x0000_0020;
 
 pub const LOG_ERROR: c_int = 5;
 
+// GLFW's numbers for a mouse's side buttons, Wayland (BTN_SIDE, BTN_EXTRA)
+// and X11 (buttons 8 and 9) alike: after left, right and middle.
+pub const MOUSE_BACK: i32 = 3;
+pub const MOUSE_FORWARD: i32 = 4;
 pub const MOUSE_CURSOR_DEFAULT: c_int = 0;
 pub const MOUSE_CURSOR_POINTING_HAND: c_int = 4;
 
@@ -381,8 +385,11 @@ pub fn close() {
     unsafe { CloseWindow() };
 }
 
+/// Input not yet taken, the end of a scroll included: the compositor sends
+/// it in a dispatch of its own, after the last pixels, and an idle loop
+/// that missed it would take it only at the next input, too late to fling.
 pub fn input_waiting() -> bool {
-    INPUT.with(|i| !i.borrow().is_empty())
+    INPUT.with(|i| !i.borrow().is_empty()) || STOPS.with(|s| s.get()) != unsafe { mascarpone_scroll_stops }
 }
 
 pub fn take_input() -> Vec<Input> {

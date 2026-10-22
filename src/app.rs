@@ -81,6 +81,7 @@ pub enum Action {
     OpenAlbum { key: String, track: usize },
     OpenPlaylist(PathBuf),
     Back,
+    Forward,
     Load { source: Source, uris: Vec<String>, start: usize },
     Append(Vec<String>),
     Enqueue(Vec<String>),
@@ -134,6 +135,7 @@ pub struct App {
     pub playlists: Grid,
     pub shown_at: Instant,
     pub pages: Vec<Page>,
+    forward: Vec<Page>,
     under_queue: Option<(Tab, Vec<Page>)>,
     pub modal: Option<Modal>,
     pub actions: RefCell<Vec<Action>>,
@@ -169,6 +171,7 @@ impl App {
             playlists: Grid::default(),
             shown_at: Instant::now(),
             pages: Vec::new(),
+            forward: Vec::new(),
             under_queue: None,
             modal: None,
             actions: RefCell::new(Vec::new()),
@@ -361,6 +364,7 @@ impl App {
     }
 
     fn toggle_queue(&mut self) {
+        self.forward.clear();
         match self.under_queue.take() {
             Some((tab, pages)) if self.tab == Tab::Queue => {
                 self.tab = tab;
@@ -381,6 +385,7 @@ impl App {
             *pages = std::mem::take(pages).iter().filter_map(|p| reopen(p, &library)).collect();
         };
         reopen(&mut self.pages);
+        reopen(&mut self.forward);
         if let Some((_, pages)) = &mut self.under_queue {
             reopen(pages);
         }
@@ -389,6 +394,7 @@ impl App {
     pub fn show_tab(&mut self, tab: Tab) {
         self.under_queue = None;
         self.pages.clear();
+        self.forward.clear();
         self.tab = tab;
         self.load_tab();
     }
@@ -464,6 +470,7 @@ impl App {
             self.master.save();
         }
         self.pages.pop();
+        self.forward.clear();
         self.queue = None;
         self.send(Command::ReloadPlaylists);
     }
@@ -471,6 +478,18 @@ impl App {
     pub fn keys(&mut self, ui: &mut Ui) {
         let inputs = std::mem::take(&mut ui.inputs);
         for input in &inputs {
+            if let Input::Press(button) = *input {
+                // the mouse's side buttons: back as Escape (a dialog closed,
+                // else a page), forward to the page Back left
+                if button == rl::MOUSE_BACK {
+                    if self.modal.take().is_none() {
+                        self.act(Action::Back);
+                    }
+                } else if button == rl::MOUSE_FORWARD && self.modal.is_none() {
+                    self.act(Action::Forward);
+                }
+                continue;
+            }
             let zoom = match config::get().which(&[Shortcut::ZoomIn, Shortcut::ZoomOut, Shortcut::ZoomReset], input) {
                 Some(Shortcut::ZoomIn) => Some(1),
                 Some(Shortcut::ZoomOut) => Some(-1),
@@ -598,6 +617,9 @@ impl App {
         self.send(Command::Play { uris: uris.clone(), start: 0 });
         self.master.point(Source::Radio { seed }, uris);
         self.queue = None;
+        if self.tab != Tab::Queue {
+            self.toggle_queue();
+        }
     }
 
     fn radio_tick(&mut self) {
@@ -693,6 +715,13 @@ impl App {
         any
     }
 
+    /// A page opened over the stack: what was ahead, left by Back, is
+    /// forgotten, as a browser's forward is.
+    fn open(&mut self, page: Page) {
+        self.forward.clear();
+        self.pages.push(page);
+    }
+
     fn perform(&mut self, action: Action) {
         match action {
             Action::Tab(tab) => self.show_tab(tab),
@@ -700,7 +729,7 @@ impl App {
                 let Some(library) = self.library.clone() else { return };
                 let Some(index) = library.artist(&name) else { return };
                 if !matches!(self.pages.last(), Some(Page::Artist(a)) if a.name() == name) {
-                    self.pages.push(Page::Artist(ArtistPage::new(&library, index)));
+                    self.open(Page::Artist(ArtistPage::new(&library, index)));
                 }
             }
             Action::OpenAlbum { key, track } => {
@@ -712,7 +741,7 @@ impl App {
                     }
                 }
                 if let Some(album) = library.album_index(&key) {
-                    self.pages.push(Page::Album(Tracks::album(&library, album, track)));
+                    self.open(Page::Album(Tracks::album(&library, album, track)));
                 }
             }
             Action::OpenPlaylist(path) => {
@@ -722,12 +751,19 @@ impl App {
                 }
                 let page = library.playlists().iter().find(|p| p.path == path).map(|p| Tracks::playlist(&library, p));
                 if let Some(page) = page {
-                    self.pages.push(Page::Playlist(page));
+                    self.open(Page::Playlist(page));
                 }
             }
             Action::Back => {
-                if self.pages.pop().is_none() && self.tab == Tab::Queue && self.under_queue.is_some() {
+                if let Some(page) = self.pages.pop() {
+                    self.forward.push(page);
+                } else if self.tab == Tab::Queue && self.under_queue.is_some() {
                     self.toggle_queue();
+                }
+            }
+            Action::Forward => {
+                if let Some(page) = self.forward.pop() {
+                    self.pages.push(page);
                 }
             }
             Action::Load { source, uris, start } => self.load(source, uris, start),
@@ -838,6 +874,9 @@ fn learn(ui: &Ui, library: &Library) {
     for album in &library.albums {
         all.push_str(&album.title);
         all.push_str(&album.artist);
+        for name in album.names() {
+            all.push_str(name);
+        }
         for t in &album.tracks {
             all.push_str(&t.title);
             all.push_str(&t.artist);

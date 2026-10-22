@@ -44,7 +44,8 @@ pub struct Tracks {
     pub cover: Option<(String, String)>,
     pub title: String,
     pub subtitle: String,
-    pub to_artist: Option<String>,
+    /// The artists the subtitle names, a link each; none, a plain subtitle.
+    pub to_artists: Vec<String>,
     pub facts: String,
     pub shuffle: Option<(PathBuf, bool)>,
     pub delete: Option<(PathBuf, String)>,
@@ -68,7 +69,7 @@ impl Tracks {
             cover: None,
             title,
             subtitle,
-            to_artist: None,
+            to_artists: Vec::new(),
             facts,
             shuffle: None,
             delete: None,
@@ -112,10 +113,11 @@ impl Tracks {
                 start: Some(i),
             })
             .collect();
-        let mut t = Tracks::new(Some(library.clone()), Plays::Load(Source::Album { key: album.key.clone() }), album.title.clone(), album.artist.clone(), facts.join("  ·  "), rows, selected);
+        let names: Vec<String> = album.names().map(str::to_owned).collect();
+        let mut t = Tracks::new(Some(library.clone()), Plays::Load(Source::Album { key: album.key.clone() }), album.title.clone(), names.join(", "), facts.join("  ·  "), rows, selected);
         t.uris = album.uris();
         t.cover = Some((album.key.clone(), album.cover_uri().to_owned()));
-        t.to_artist = Some(album.artist.clone());
+        t.to_artists = names;
         t.seed = Some(Seed::Album(album.key.clone()));
         t
     }
@@ -359,7 +361,7 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     let fw = (x0 + cw - fx).max(rem(4.0));
     let s = rem(0.5);
     let title_lines = ui.face(Style::Title).wrap(&t.title, fw, 2);
-    let sub_lines = if t.subtitle.is_empty() { Vec::new() } else { ui.face(Style::Header).wrap(&t.subtitle, fw, 1) };
+    let sub_lines = if t.subtitle.is_empty() || !t.to_artists.is_empty() { Vec::new() } else { ui.face(Style::Header).wrap(&t.subtitle, fw, 1) };
     let (lt, lh) = (ui.line(Style::Title), ui.line(Style::Header));
     let button = ui.square_side();
     if let Some((key, uri)) = &t.cover {
@@ -374,19 +376,16 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
         ui.text(Style::Title, line, fx, fy, fw);
         fy += lt;
     }
-    if !sub_lines.is_empty() {
+    if !t.to_artists.is_empty() {
+        fy += s;
+        if let Some(i) = ui.links(Style::Header, &t.to_artists, fx, fy, fw) {
+            app.act(Action::OpenArtist(t.to_artists[i].clone()));
+        }
+        fy += lh;
+    } else if !sub_lines.is_empty() {
         fy += s;
         for line in &sub_lines {
-            match &t.to_artist {
-                Some(name) => {
-                    if ui.link(Style::Header, line, fx, fy, fw).0 {
-                        app.act(Action::OpenArtist(name.clone()));
-                    }
-                }
-                None => {
-                    ui.text(Style::Header, line, fx, fy, fw);
-                }
-            }
+            ui.text(Style::Header, line, fx, fy, fw);
             fy += lh;
         }
     }

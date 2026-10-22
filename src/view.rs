@@ -267,8 +267,9 @@ fn album_card(app: &App, ui: &mut Ui, cell: R, library: &Arc<Library>, a: usize,
     let y = y + ui.line(Style::Header) + rem(0.25);
     let year = album.year.as_deref().unwrap_or_default();
     let yw = if year.is_empty() { 0.0 } else { ui.text_right(Style::Subtitle, year, cover.right(), y) + rem(0.5) };
-    if ui.link(Style::Subtitle, &album.artist, cover.x, y, side - yw).0 {
-        app.act(Action::OpenArtist(album.artist.clone()));
+    let names: Vec<String> = album.names().map(str::to_owned).collect();
+    if let Some(i) = ui.links(Style::Subtitle, &names, cover.x, y, side - yw) {
+        app.act(Action::OpenArtist(names[i].clone()));
     }
     if ui.click(cell) {
         app.act(Action::OpenAlbum { key: album.key.clone(), track: 0 });

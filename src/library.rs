@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -17,19 +17,74 @@ pub struct Track {
     pub mbid: Option<String>,
 }
 
+/// One of the artists an album is credited to, as the tags name it, with
+/// the MusicBrainz ids the tags give it: one, usually; none for the
+/// untagged; several when the credit is a collaboration the tags did
+/// not split, "Charlie Haden & Pat Metheny" with both ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub name: String,
+    pub mbids: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct Album {
     pub key: String,
     pub title: String,
+    /// The credit as written: "The Velvet Underground & Nico".
     pub artist: String,
     pub year: Option<String>,
     pub tracks: Vec<Track>,
     pub loose: bool,
     pub mbid: Option<String>,
-    pub artist_mbids: Vec<String>,
+    /// Who the credit names: the credit itself, whole, until the tags
+    /// split it (see `split`), then one member a name.
+    pub members: Vec<Member>,
 }
 
 impl Album {
+    pub fn whole(artist: &str, mbids: Vec<String>) -> Vec<Member> {
+        vec![Member { name: artist.to_owned(), mbids }]
+    }
+
+    /// The names of the members, for the album's artist line.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.members.iter().map(|m| m.name.as_str())
+    }
+
+    /// Splits a credit without ids on its semicolons, "Anton Webern;
+    /// Pierre Boulez": the one join no band's name contains, the one
+    /// classical tagging uses between composer and performers. The
+    /// members go without ids, to be looked up by name.
+    pub fn split_joined(&mut self) -> bool {
+        let [Member { mbids, .. }] = self.members.as_slice() else { return false };
+        if !mbids.is_empty() || !self.artist.contains("; ") {
+            return false;
+        }
+        let names: Vec<String> = self.artist.split("; ").map(str::trim).filter(|n| !n.is_empty()).map(str::to_owned).collect();
+        self.split(&names)
+    }
+
+    /// Splits the credit into the artists the tags name one by one
+    /// (`ALBUMARTISTS`, a value each), when they are distinct and, if
+    /// the tags give ids, as many as the ids, which pair with them in
+    /// order; without ids the members go nameless of id, to be looked
+    /// up by name. A name repeated, or names that do not match the
+    /// ids, leaves the credit whole.
+    pub fn split(&mut self, names: &[String]) -> bool {
+        let [Member { mbids, .. }] = self.members.as_slice() else { return false };
+        if names.len() < 2 || (!mbids.is_empty() && names.len() != mbids.len()) {
+            return false;
+        }
+        let distinct: HashSet<&str> = names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
+        if distinct.len() != names.len() {
+            return false;
+        }
+        let ids = mbids.iter().map(|m| vec![m.clone()]).chain(std::iter::repeat(Vec::new()));
+        self.members = names.iter().zip(ids).map(|(name, mbids)| Member { name: name.trim().to_owned(), mbids }).collect();
+        true
+    }
+
     pub fn cover_uri(&self) -> &str {
         &self.tracks[0].uri
     }
@@ -157,7 +212,9 @@ fn sort_name(name: &str) -> String {
 }
 
 impl Library {
-    pub fn build(songs: Vec<Song>) -> Library {
+    /// The albums the songs make, each credited whole; the library is
+    /// assembled once the credits that the tags split are split.
+    pub fn gather(songs: Vec<Song>) -> Vec<Album> {
         let mut albums: Vec<Album> = Vec::new();
         let mut by_key: HashMap<String, usize> = HashMap::new();
         for song in songs {
@@ -180,7 +237,7 @@ impl Library {
                     tracks: Vec::new(),
                     loose,
                     mbid: None,
-                    artist_mbids: Vec::new(),
+                    members: Vec::new(),
                 });
                 albums.len() - 1
             });
@@ -188,9 +245,9 @@ impl Library {
             if album.mbid.is_none() {
                 album.mbid = ids(&song, &Tag::MusicBrainzReleaseId).pop();
             }
-            if album.artist_mbids.is_empty() {
+            if album.members.is_empty() || album.members[0].mbids.is_empty() {
                 let tag = if song.album_artists().is_empty() { Tag::MusicBrainzArtistId } else { Tag::MusicBrainzReleaseArtistId };
-                album.artist_mbids = ids(&song, &tag);
+                album.members = Album::whole(&album.artist, ids(&song, &tag));
             }
             if album.year.is_none() {
                 let date = song
@@ -218,21 +275,25 @@ impl Library {
         for album in &mut albums {
             album.tracks.sort_by_key(|t| (t.disc, t.number));
         }
-        Library::assemble(albums)
+        albums
     }
 
-    fn assemble(mut albums: Vec<Album>) -> Library {
+    pub(crate) fn assemble(mut albums: Vec<Album>) -> Library {
         albums.sort_by_cached_key(|a| (sort_name(&a.title), sort_name(&a.artist)));
-        let mut by_artist: HashMap<&str, Vec<usize>> = HashMap::new();
+        // an album under each of its members: a collaboration the tags
+        // split is on both artists' pages, the credit itself no artist
+        let mut by_artist: HashMap<&str, Vec<(usize, &[String])>> = HashMap::new();
         for (i, album) in albums.iter().enumerate() {
-            by_artist.entry(&album.artist).or_default().push(i);
+            for member in &album.members {
+                by_artist.entry(&member.name).or_default().push((i, &member.mbids));
+            }
         }
         let mut artists: Vec<Artist> = by_artist
             .into_iter()
             .map(|(name, mut list)| {
-                list.sort_by_cached_key(|&i| (albums[i].year.clone().unwrap_or_default(), sort_name(&albums[i].title)));
-                let mbids = artist_mbids(list.iter().map(|&i| albums[i].artist_mbids.as_slice()));
-                Artist { name: name.to_owned(), albums: list, mbids }
+                list.sort_by_cached_key(|&(i, _)| (albums[i].year.clone().unwrap_or_default(), sort_name(&albums[i].title)));
+                let mbids = artist_mbids(list.iter().map(|(_, ids)| *ids));
+                Artist { name: name.to_owned(), albums: list.into_iter().map(|(i, _)| i).collect(), mbids }
             })
             .collect();
         artists.sort_by_cached_key(|a| sort_name(&a.name));
@@ -258,7 +319,7 @@ impl Library {
                 tracks: (1..=*n).map(|i| Track { uri: format!("{artist}/{title}/{i}.ogg"), title: format!("{title} {i}"), artist: artist.to_string(), disc: 1, number: i as u64, duration: None, mbid: None }).collect(),
                 loose: false,
                 mbid: None,
-                artist_mbids: Vec::new(),
+                members: Album::whole(artist, Vec::new()),
             })
             .collect();
         Library::assemble(albums)
@@ -380,5 +441,84 @@ pub fn clock(d: Duration) -> String {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
     } else {
         format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(artist: &str, title: &str, ids: &[&str]) -> Album {
+        let mut lib = Library::of(&[(artist, title, 1)]);
+        let mut album = lib.albums.remove(0);
+        album.members = Album::whole(artist, ids.iter().map(|i| i.to_string()).collect());
+        album
+    }
+
+    #[test]
+    fn a_split_credit_puts_the_album_under_each_member() {
+        let mut nico = album("The Velvet Underground & Nico", "The Velvet Underground & Nico", &["vu", "nico"]);
+        assert!(nico.split(&["The Velvet Underground".into(), "Nico".into()]));
+        let loaded = album("The Velvet Underground", "Loaded", &["vu"]);
+        let lib = Library::assemble(vec![nico, loaded]);
+        let names: Vec<&str> = lib.artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Nico", "The Velvet Underground"], "the credit is no artist");
+        let vu = &lib.artists[lib.artist("The Velvet Underground").unwrap()];
+        assert_eq!(vu.albums.len(), 2);
+        assert_eq!(vu.mbids, ["vu"]);
+        let nico = &lib.artists[lib.artist("Nico").unwrap()];
+        assert_eq!(nico.albums.len(), 1);
+        assert_eq!(nico.mbids, ["nico"]);
+        let album = &lib.albums[nico.albums[0]];
+        assert_eq!(album.artist, "The Velvet Underground & Nico", "the credit stays as written");
+        assert_eq!(album.names().collect::<Vec<_>>(), ["The Velvet Underground", "Nico"]);
+    }
+
+    #[test]
+    fn a_credit_the_tags_do_not_split_stays_whole() {
+        let mut haden = album("Charlie Haden & Pat Metheny", "Beyond the Missouri Sky", &["charlie", "pat"]);
+        assert!(!haden.split(&["Charlie Haden".into(), "Charlie Haden".into()]), "the tagger's guess, the first name twice");
+        assert!(!haden.split(&["Charlie Haden".into()]), "one name for two ids");
+        assert!(!haden.split(&["Charlie Haden".into(), "Pat Metheny".into(), "Someone".into()]), "more names than ids");
+        assert_eq!(haden.members.len(), 1);
+        let mut reznor = album("Trent Reznor & Atticus Ross", "Before the Flood", &[]);
+        assert!(!reznor.split(&["Trent Reznor".into(), "Trent Reznor".into()]), "the first name twice, no ids");
+        assert!(reznor.split(&["Trent Reznor".into(), "Atticus Ross".into()]), "distinct names without ids: the tagger did split them");
+        assert!(reznor.members.iter().all(|m| m.mbids.is_empty()));
+        let lib = Library::assemble(vec![haden, reznor]);
+        let names: Vec<&str> = lib.artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Atticus Ross", "Charlie Haden & Pat Metheny", "Trent Reznor"]);
+        assert!(lib.artists[0].mbids.is_empty(), "looked up by name");
+        let haden = &lib.artists[lib.artist("Charlie Haden & Pat Metheny").unwrap()];
+        assert_eq!(haden.mbids, ["charlie", "pat"], "both ids, for the members to be asked about");
+    }
+
+    #[test]
+    fn a_credit_without_ids_splits_on_its_semicolons() {
+        let mut webern = album("Anton Webern; Pierre Boulez", "Complete Works", &[]);
+        assert!(webern.split_joined());
+        assert_eq!(webern.names().collect::<Vec<_>>(), ["Anton Webern", "Pierre Boulez"]);
+        let mut tagged = album("Ludwig van Beethoven; Takács Quartet", "Quartets", &["lvb", "takacs"]);
+        assert!(!tagged.split_joined(), "with ids, the tags' names decide");
+        let mut amp = album("Iggy & the Stooges", "Raw Power", &[]);
+        assert!(!amp.split_joined(), "an ampersand is a band's");
+        let mut once = album("Anton Webern; Pierre Boulez", "Complete Works", &[]);
+        assert!(once.split_joined() && !once.split_joined());
+    }
+
+    #[test]
+    fn a_member_s_id_is_the_one_most_of_its_albums_give() {
+        let mut a = album("Brian Eno & Harold Budd", "The Pearl", &["eno", "budd"]);
+        assert!(a.split(&["Brian Eno".into(), "Harold Budd".into()]));
+        let b = album("Brian Eno", "Another Green World", &["eno"]);
+        let c = album("Brian Eno", "Discreet Music", &["eno-other"]);
+        let lib = Library::assemble(vec![a, b, c]);
+        let eno = &lib.artists[lib.artist("Brian Eno").unwrap()];
+        assert_eq!(eno.albums.len(), 3);
+        assert_eq!(eno.mbids, ["eno"]);
+        let mut split_once = album("Brian Eno & Harold Budd", "The Pearl", &["eno", "budd"]);
+        assert!(split_once.split(&[" Brian Eno ".into(), "Harold Budd".into()]), "trimmed");
+        assert!(!split_once.split(&["Brian Eno".into(), "Harold Budd".into()]), "split once");
+        assert_eq!(split_once.members[0].name, "Brian Eno");
     }
 }

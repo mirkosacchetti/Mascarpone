@@ -111,7 +111,8 @@ KP_Subtract, KP_0. Every action and its default keys:
 Albums, Artists, Playlists and Queue in the header, which stays over
 every page; a click on a tab, even the one on, comes back to its list,
 dealt again (the keys below are the defaults: 1 to 4 or Ctrl+Tab
-switch, Escape goes back a page). The tab lit is the page's kind: an
+switch, Escape goes back a page; a mouse's back button does too, and
+its forward button returns to the page Back left). The tab lit is the page's kind: an
 album's page lights Albums whatever tab it was opened over, and Escape
 still goes back to that tab. An album's, a playlist's, an
 artist's page and the queue have the same head on top, still (the
@@ -128,7 +129,9 @@ One card is selected: j and ; move it left and right, k and l down and
 up, Enter opens it, as does a click; the play button on an album's
 cover or a playlist's covers (under the pointer, or on the selected
 card) plays the album or the playlist. The
-artist on an album card opens their page. On an album's or playlist's
+artist on an album card opens their page; an album credited to several,
+"The Velvet Underground & Nico", names them one by one, each a link,
+separated by commas, and sits on each one's page. On an album's or playlist's
 page one track is selected (k and l, or Down and Up, move it; a click
 plays from a row, or pauses the song on): Play and Enter play the list
 from it, or pause and resume when it is the song on; Add to queue
@@ -189,6 +192,27 @@ icon one of its glyphs), flat (no frames, shadows or rounded corners
 but on buttons), no animations, no window buttons: the compositor's
 rules place the window. A character the font does not have shows as a
 box: there is no other font to fall back on.
+
+## The artists
+
+An album's artist is its album artist tag, else the artist's, the
+credit as written, and that is what the player bar and the picker show.
+The artists list, though, holds the artists the tags name one by one:
+`ALBUMARTISTS`, a value each, as beets and Picard write it from
+MusicBrainz's artist credit (`ARTISTS` when the file has no album
+artist), paired in order with the ids of `MUSICBRAINZ_ALBUMARTISTID`
+when there are as many. A credit splits only on those names, distinct,
+two or more: never on "&", "," or "/", which bands' names hold (Iggy &
+the Stooges; Emerson, Lake & Palmer); the tagger's guess for an album
+it could not match, the first name repeated, leaves the credit whole,
+one artist, to be asked about its members by id. Without ids, a credit
+joined with "; ", classical tagging's composer and performers, splits
+on the semicolons. The names are read from the file: mpd's
+`readcomments` for ogg and flac, the ID3 frames themselves for mp3,
+since mpd (0.24) reads a many-valued ID3v2.4 frame as its first value
+repeated. The database keeps the credit on the album and the artists
+it is credited to in `album_artist`, in order; the members of one
+credit are "credited with" each other.
 
 ## Artists from the net
 
@@ -295,8 +319,8 @@ for the record and for `sqlite3`.
 `s` (or the radio button: on an album's and an artist's page, on
 their cards, right of the play button, and at the end of every track
 row the library has) starts a radio from what is
-selected: a track, the seed and nothing more, nearest to itself and so
-likely to come first, about three times in ten, or not; an album,
+selected, and brings up the queue over the page, as Tab does: a track, the seed and nothing more, nearest to itself and so
+likely to come first, about four times in ten, or not; an album,
 whose tracks together are what the path starts from, none of them
 forced in; an artist, fifteen of whose tracks open it at random, and
 whose tracks are all it plays. Then
@@ -306,26 +330,35 @@ arc from the seed, always from the seed (a track's vector,
 the mean of an album's or an artist's tracks) and never from what
 played last, three tracks a part, each part passing into the next over
 its three tracks, a third a track: the
-equilibrium (the seed itself, no shift), the break
-(tension: the minor and diminished triads up, the loudness and
-brightness less steady; the harmony moving and far from a key, more
-sections, the pulse loose, a dip), the adventure (faster, louder,
-brighter, more varied, more vocal; a crescendo, many sections, dense
-with attacks, through-composed), the resolution (loud and open, the
-major up; an arch that comes down, a return, the harmony settling),
-the new equilibrium (slower, quieter, darker, sparser, less vocal; a
-fade, sparse, still, few sections, back on itself and on a pulse).
+equilibrium (the seed itself, no shift), the break (a first
+dissonance: the diminished and the minor up, the major down, a step
+off the key and the harmony moving; the timbre dirtied, flatness and
+crossings up; the loudness less steady, a dip; the pulse broken, the
+repetition too, a section's edge), the adventure (the longest unrest:
+far off the key and moving, diminished and augmented bridges, the
+timbre layered, more registers; loudness in waves, a crescendo;
+faster, denser, the pulse put to the test; the motif varied rather
+than repeated, many sections, more vocal), the climax (the densest
+and loudest, brightest, fullest; the tension sustained, far from the
+key but still, the diminished, a touch of the major for the victory;
+the fastest and thickest pulse, a motif hammered; an arch, a rise
+that resolves), the new equilibrium (home: on a key, the major up,
+the minor and diminished down; lighter and cleaner, quieter and
+steady, a fade; the pulse regular, sparse, slower; the repetition of
+the start, few sections, the harmony still; less vocal).
 Each part is a shift of the seed's vector along
 bliss's features, the voice's and the shape's (`ARC` in `src/radio.rs`; a track between two parts
 gets the two shifts in proportion), measured in standard
 deviations of each feature over the library, so that a feature the
 library hardly spans is shifted as gently as one it spans whole; its track is the
-nearest to that shift, one of the six nearest, the nearer the likelier,
+nearest to that shift, one of the six nearest, the nearer the likelier
+(by the square of the rank: the nearest four times in ten, the second
+three, the sixth once in ninety),
 never one already in the queue, never one longer than a quarter of an
-hour (a whole side, a live set). A track by an artist linked
-to the seed's artist counts as nearer: its distance is shortened by
-35% for a relation or an influence, by 25% for an artist Deezer finds
-alike. The distance is over bliss's 23 features, the two of the
+hour (a whole side, a live set). The artists' relations are gathered
+but not weighed, for now: the track's analysis alone decides (the
+pull, a track by an artist linked to the seed's a third nearer, is
+there commented in `src/radio.rs`). The distance is over bliss's 23 features, the two of the
 voice and the eight of the shape, each in -1..1: a song and an
 instrumental are far apart however alike they sound otherwise, a
 crescendo and a fade too; a track not shaped yet (an older version)

@@ -309,6 +309,7 @@ impl Ui {
                     }
                 }
                 Input::ScrollStop => self.fling = Ui::fling_speed(std::mem::take(&mut self.swipe), scale),
+                i @ Input::Press(rl::MOUSE_BACK | rl::MOUSE_FORWARD) => self.inputs.push(i),
                 Input::Press(_) | Input::Release(_) => {}
                 i => {
                     self.fling = 0.0;
@@ -556,6 +557,35 @@ impl Ui {
             self.rect(R::new(x.round(), (y + face.line * 0.86).round(), w, thick), color);
         }
         (self.click(r), w)
+    }
+
+    /// A line of names, a link each, separated by commas: the artists an
+    /// album is credited to. What does not fit is cut with an ellipsis,
+    /// the names beyond it dropped. The index of the name clicked.
+    pub fn links(&mut self, style: Style, names: &[String], x: f32, y: f32, max: f32) -> Option<usize> {
+        let face = self.face(style);
+        let comma = face.width(", ");
+        let mut clicked = None;
+        let mut at = x;
+        for (i, name) in names.iter().enumerate() {
+            let room = x + max - at;
+            if room <= 0.0 {
+                break;
+            }
+            let (hit, w) = self.link(style, name, at, y, room);
+            if hit {
+                clicked = Some(i);
+            }
+            at += w;
+            if face.width(name) > room {
+                break;
+            }
+            if i + 1 < names.len() {
+                face.draw(", ", at, y, self.tint(style.color()));
+                at += comma;
+            }
+        }
+        clicked
     }
 
     pub fn icon(&self, glyph: &str, r: R, em: f32, c: Color) {
