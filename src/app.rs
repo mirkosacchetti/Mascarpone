@@ -874,6 +874,7 @@ impl App {
             Action::Refresh => {
                 self.notice(format!("{}  MPD", glyphs::REFRESH), None);
                 self.redeal = true;
+                self.pictures.forget_covers();
                 self.send(Command::Refresh);
             }
             Action::Radio(seed) => self.start_radio(seed),

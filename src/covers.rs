@@ -22,6 +22,16 @@ pub fn path_for(key: &str) -> PathBuf {
     cache_dir().join(format!("{}.jpg", hash(key)))
 }
 
+/// The thumbnail is older than the track it came from or the cover.jpg
+/// beside it: the album has a new cover.
+fn stale(thumb: &Path, uri: &str) -> bool {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let Some(made) = modified(thumb) else { return true };
+    let song = crate::library::music_dir().join(uri);
+    let folder_cover = song.parent().map(|d| d.join("cover.jpg"));
+    [Some(song), folder_cover].into_iter().flatten().filter_map(|p| modified(&p)).any(|t| t > made)
+}
+
 pub fn hash(name: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in name.bytes() {
@@ -191,7 +201,7 @@ impl Pictures {
             return self.texture(&name);
         }
         let path = path_for(key);
-        if path.exists() {
+        if path.exists() && !stale(&path, uri) {
             self.decode(name, path, false);
         } else {
             self.slots.borrow_mut().insert(name, Slot::Waiting);
@@ -204,7 +214,7 @@ impl Pictures {
         let name = format!("c:{key}");
         if !self.slots.borrow().contains_key(&name) {
             let path = path_for(key);
-            if let Some(p) = path.exists().then(|| decode(&path, false)).flatten() {
+            if let Some(p) = (path.exists() && !stale(&path, uri)).then(|| decode(&path, false)).flatten() {
                 let t = rl::texture(&p.rgba, p.width, p.height);
                 self.slots.borrow_mut().insert(name.clone(), Slot::Ready(t, self.frame.get()));
             }
@@ -260,6 +270,20 @@ impl Pictures {
 
     pub fn artist_arrived(&self, name: &str, info: &crate::net::Info) {
         self.known.borrow_mut().insert(name.to_owned(), Known { bio: info.bio.clone(), url: info.wikipedia.clone(), portrait: info.portrait });
+    }
+
+    /// The covers on screen asked again: a refresh shows the ones changed
+    /// on disk since they were drawn.
+    pub fn forget_covers(&self) {
+        self.slots.borrow_mut().retain(|name, slot| {
+            if !name.starts_with("c:") {
+                return true;
+            }
+            if let Slot::Ready(t, _) = slot {
+                self.dropped.borrow_mut().push(*t);
+            }
+            false
+        });
     }
 
     pub fn retry(&self, name: &str) {
