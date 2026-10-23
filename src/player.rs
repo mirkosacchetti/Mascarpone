@@ -17,7 +17,7 @@ const BIG: f32 = 3.25;
 const PAD: f32 = 1.0;
 
 pub fn height(ui: &Ui) -> f32 {
-    rem(EDGE) + ui.line(Style::Header) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(ui.square_side()) + rem(BOTTOM)
+    rem(EDGE) + ui.line(Style::Header) + ui.line(Style::Subtitle) + rem(0.25) + rem(0.5) + rem(EDGE) + rem(BIG).max(ui.square_side()) + rem(BOTTOM)
 }
 
 pub fn draw(app: &App, ui: &mut Ui, r: R) {
@@ -38,7 +38,7 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let mut at = clock.map(|c| if playing { c.elapsed + c.since.elapsed() } else { c.elapsed }.min(c.length)).unwrap_or_default();
     let lh = ui.line(Style::Header);
     let times = r.y + rem(EDGE);
-    let bar = R::new(x0, times + lh + rem(0.25), cw, rem(0.5));
+    let bar = R::new(x0, times + lh + ui.line(Style::Subtitle) + rem(0.25), cw, rem(0.5));
     let grip = R::new(bar.x, bar.y - rem(0.25), bar.w, bar.h + rem(0.5));
     let seekable = !length.is_zero();
     let to = |ui: &Ui| Duration::from_secs_f64((((ui.mouse.x - bar.x) / bar.w).clamp(0.0, 1.0) as f64) * length.as_secs_f64());
@@ -113,18 +113,14 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
         Some(uri) => app.library.as_ref().and_then(|l| l.place(uri).map(|(a, t)| (l.clone(), a, t))),
         None => app.waiting(),
     };
-    let artist = match &place {
-        Some((library, a, _)) => Some(library.albums[*a].artist.clone()),
-        None => now.and_then(|n| n.song.as_ref()).and_then(|s| s.song.artists().first().cloned()),
-    };
-    if (now.is_some_and(|n| n.song.is_some()) || place.is_some() || app.master.source != Source::None)
-        && ui.square(x0 + rh + rem(0.5), row, app.master.glyph(), Look::Plain, true)
-    {
+    // the playlist or the radio the queue plays, next to the album; nothing for an album or a loose queue
+    if matches!(app.master.source, Source::Playlist { .. } | Source::Radio { .. }) && ui.square(x0 + rh + rem(0.5), row, app.master.glyph(), Look::Plain, true) {
         open_source(app);
     }
-    if let Some(filed) = artist {
-        if ui.square(x0, row, glyphs::ARTIST, Look::Plain, true) {
-            app.act(Action::OpenArtist(filed));
+    // the album of the track playing, the track selected on its page
+    if let Some((library, a, t)) = &place {
+        if ui.square(x0, row, glyphs::ALBUM, Look::Plain, true) {
+            app.act(Action::OpenAlbum { key: library.albums[*a].key.clone(), track: *t });
         }
     }
 
@@ -135,6 +131,17 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
             None => glyphs::NOTHING.to_owned(),
         },
     };
+    // the track's artists, under the title, a link each: the album's
+    // members when the track is credited as the album, else the track's
+    // own tag; mpd's artists, plain, for a track the library has not
+    let by: Vec<String> = match &place {
+        Some((library, a, t)) => {
+            let album = &library.albums[*a];
+            let track = &album.tracks[*t];
+            if track.artist == album.artist { album.names().map(str::to_owned).collect() } else { vec![track.artist.clone()] }
+        }
+        None => now.and_then(|n| n.song.as_ref()).map(|s| s.song.artists().to_vec()).unwrap_or_default(),
+    };
     let ends = match clock {
         Some(_) => ui.width(Style::Header, &library::clock(at)).max(ui.width(Style::Header, &library::clock(length))) + rem(PAD),
         None => 0.0,
@@ -142,7 +149,29 @@ fn bar(app: &App, ui: &mut Ui, r: R) {
     let max = cw - 2.0 * ends;
     if max > 0.0 {
         let w = ui.width(Style::Header, &title).min(max);
-        ui.text(Style::Header, &title, (x0 + (cw - w) / 2.0).round(), times, max);
+        let tx = (x0 + (cw - w) / 2.0).round();
+        match &place {
+            Some((library, a, t)) => {
+                if ui.link(Style::Header, &title, tx, times, max).0 {
+                    app.act(Action::OpenAlbum { key: library.albums[*a].key.clone(), track: *t });
+                }
+            }
+            None => {
+                ui.text(Style::Header, &title, tx, times, max);
+            }
+        }
+        if !by.is_empty() {
+            let line = by.join(", ");
+            let w = ui.width(Style::Subtitle, &line).min(max);
+            let bx = (x0 + (cw - w) / 2.0).round();
+            if place.is_some() {
+                if let Some(i) = ui.links(Style::Subtitle, &by, bx, times + lh, max) {
+                    app.act(Action::OpenArtist(by[i].clone()));
+                }
+            } else {
+                ui.text(Style::Subtitle, &line, bx, times + lh, max);
+            }
+        }
     }
 }
 

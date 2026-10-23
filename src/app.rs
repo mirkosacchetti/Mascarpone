@@ -128,7 +128,8 @@ pub struct App {
     pub queue_scroll: Option<crate::ui::Scroll>,
     pub connected: bool,
     lost: bool,
-    pub snack: Option<(String, Option<Instant>)>,
+    /// A message on the header's right, until an instant or until the next.
+    pub message: Option<(String, Option<Instant>)>,
     pub tab: Tab,
     pub albums: Grid,
     pub artists: Grid,
@@ -136,7 +137,7 @@ pub struct App {
     pub shown_at: Instant,
     /// The grids are dealt anew with the next library: asked by Refresh.
     redeal: bool,
-    /// mpd's crossfade before a radio set its own, to put back when the radio ends.
+    /// mpd's crossfade before a radio or a playlist set its own, to put back when it ends.
     fade_before: Option<Duration>,
     pub pages: Vec<Page>,
     forward: Vec<Page>,
@@ -167,7 +168,7 @@ impl App {
             queue_scroll: None,
             connected: true,
             lost: false,
-            snack: None,
+            message: None,
             tab: Tab::Albums,
             albums: Grid::default(),
             artists: Grid::default(),
@@ -231,7 +232,7 @@ impl App {
     }
 
     pub fn notice(&mut self, text: String, for_: Option<Duration>) {
-        self.snack = Some((text, for_.map(|d| Instant::now() + d)));
+        self.message = Some((text, for_.map(|d| Instant::now() + d)));
     }
 
     pub fn begin_frame(&mut self, ui: &Ui) -> bool {
@@ -241,9 +242,9 @@ impl App {
             any = true;
             self.event(event, ui);
         }
-        if let Some((_, Some(until))) = &self.snack {
+        if let Some((_, Some(until))) = &self.message {
             if Instant::now() >= *until {
-                self.snack = None;
+                self.message = None;
                 any = true;
             }
         }
@@ -475,6 +476,7 @@ impl App {
             Source::Radio { seed: Seed::Track(uri) } => ("radio:track", Some(uri.clone())),
             Source::Radio { seed: Seed::Album(key) } => ("radio:album", Some(key.clone())),
             Source::Radio { seed: Seed::Artist(artist) } => ("radio:artist", Some(artist.clone())),
+            Source::Radio { seed: Seed::Playlist(path) } => ("radio:playlist", Some(path.to_string_lossy().into_owned())),
             _ => ("queue", None),
         };
         let _ = self.archive.send(Job::Origin { path: path.clone(), name: name.to_owned(), origin: origin.to_owned(), url });
@@ -622,7 +624,7 @@ impl App {
                 Tab::Queue => self.queue.as_ref().and_then(|q| q.selected_uri()).map(Seed::Track),
                 Tab::Albums => self.albums.order.get(self.albums.selected).and_then(|&i| library.albums.get(i)).map(|a| Seed::Album(a.key.clone())),
                 Tab::Artists => self.artists.order.get(self.artists.selected).and_then(|&i| library.artists.get(i)).map(|a| Seed::Artist(a.name.clone())),
-                Tab::Playlists => None,
+                Tab::Playlists => self.playlists.order.get(self.playlists.selected).and_then(|&i| library.playlists().get(i).map(|p| Seed::Playlist(p.path.clone()))),
             },
         }
     }
@@ -648,14 +650,15 @@ impl App {
         }
     }
 
-    /// A radio has its crossfade (`[radio] crossfade`), the queue
-    /// otherwise what mpd had before the radio.
+    /// A radio or a playlist has its crossfade (`[radio] crossfade`), the
+    /// queue otherwise what mpd had before.
     fn fade_tick(&mut self) {
         let Some(now) = &self.now else { return };
         let wanted = crate::config::get().crossfade;
-        match (matches!(self.master.source, Source::Radio { .. }), self.fade_before) {
+        let fades = matches!(self.master.source, Source::Radio { .. } | Source::Playlist { .. });
+        match (fades, self.fade_before) {
             (true, None) => {
-                // a radio found already on at the start (the app restarted into it) has the fade set by this app
+                // one found already on at the start (the app restarted into it) has the fade set by this app
                 self.fade_before = Some(if now.status.crossfade == wanted { Duration::ZERO } else { now.status.crossfade });
                 if now.status.crossfade != wanted {
                     self.send(Command::Crossfade(wanted));

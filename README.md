@@ -29,7 +29,7 @@ for an album, with the folder's name.
 | | |
 |---|---|
 | ![An artist's page: the portrait and the words from the net, the albums](docs/artist.webp) | ![An album's page](docs/album.webp) |
-| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue, a radio from Calibro 35's first album on, the song playing marked, a radio key on every row](docs/queue.webp) |
+| ![The playlists, each with the covers of its first sixteen albums](docs/playlists.webp) | ![The queue playing a playlist, its shuffle, Clear and Play in the head, the song playing marked, a radio key on every row](docs/queue.webp) |
 | ![The picker on everything](docs/picker.webp) | ![The commands' picker, every action with its keys](docs/commands.webp) |
 
 ## Build
@@ -75,7 +75,7 @@ key left out keeps its default, one not known is said on stderr.
 
     [radio]
     threads = 8             # files analyzed at a time: half the cores
-    crossfade = 1           # seconds, between a radio's tracks only
+    crossfade = 1           # seconds, between a radio's or a playlist's tracks
 
     [keys]
     play_pause = Space c    # an action = its keys, by spaces
@@ -103,7 +103,7 @@ KP_Subtract, KP_0. Every action and its default keys:
 | `volume_up` `volume_down` | + =, - | five points |
 | `repeat` `repeat_one` | r R | on or off |
 | `go_to_playing` | g | the album or the playlist the queue plays |
-| `radio` | s | the radio from what is selected: a track, an album, an artist |
+| `radio` | s | the radio from what is selected: a track, an album, an artist, a playlist |
 | `save_queue` `clear_queue` | | |
 | `refresh` | Ctrl+r | |
 | `zoom_in` `zoom_out` `zoom_reset` | Ctrl+= Ctrl++, Ctrl+-, Ctrl+0 | the keypad's too |
@@ -163,10 +163,14 @@ search` (the picker on everything), `mascarpone commands` (the
 commands' picker), `mascarpone escape` (a dialog closed, else back a
 page). For a script, a screenshot.
 
-The player bar at the bottom has the song's title over the time (a
+The player bar at the bottom has the song's title, a link to its
+album's page with it selected, and under it its artists, a link each
+to their page (the album's members when the track is credited as the
+album is, else the track's own tag), over the time (a
 click or a drag seeks), where the song is and its length at its ends;
-under it a row of buttons: the artist (it opens their page) and the
-album or playlist the queue plays (it opens its page) on the left,
+under it a row of buttons: the song's album (it opens its page, the
+song selected) and, when the queue plays a playlist or a radio, its
+button (it opens the playlist's page, or the queue) on the left,
 previous, play and next in the middle, repeat and repeat one (mpd's
 single and repeat together) on the right, lit while on.
 
@@ -183,8 +187,8 @@ opens, Escape closes.
 
 The playlists are the m3u files in `Playlists` under the music folder
 (`~/Music`, both set in the configuration), their entries relative to the file; an entry the library
-does not have is shown greyed and skipped. Shuffle, a button after a
-playlist's Play (and first on the queue's, when it plays one), lit
+does not have is shown greyed and skipped. Shuffle, the first button
+of a playlist's head (and of the queue's, when it plays one), lit
 while on (on unless switched off), plays it in a random order
 (mpd's random mode, the queue in the file's order), from any track; an
 album always plays in order. It is kept in
@@ -283,7 +287,9 @@ more. The analysis runs on the archive's thread at the lowest priority
 the first time a few seconds after the window opens) after every load
 of the library, on the files new or changed since (by their
 modification time and size); it shows in the header, on the right, as
-done of how many, and the radio works with what is analyzed so far. A
+done of how many (the app's messages, mpd found or lost, the library's
+counts, a playlist saved, go on the same line, left of the counts, for
+a few seconds), and the radio works with what is analyzed so far. A
 file symphonia cannot decode (Opus) is left out, its error in the
 database. In the same pass each file is heard for a voice
 (`src/voice.rs`): YAMNet gives an embedding for every second of sound,
@@ -309,9 +315,9 @@ what is gone dropped: `artist` (the albums' artists marked
 `in_library`, with the MusicBrainz id from the tags), `album` and
 `track` with their tags, the MusicBrainz ids among them, `playlist` with its
 shuffle and its origin in two columns, what it came from and the
-origin's address (`queue`; `radio:track`, `radio:album` or
-`radio:artist` with the track's uri, the album's key or the artist's
-name; a service's word, `spotify`, with the playlist's web link, filled
+origin's address (`queue`; `radio:track`, `radio:album`,
+`radio:artist` or `radio:playlist` with the track's uri, the album's key, the artist's
+name or the playlist's path; a service's word, `spotify`, with the playlist's web link, filled
 in by hand for now; both empty for a file from nowhere known, both
 kept over the rewrites) and `playlist_entry` (a row an entry, with the
 track's id when the library has it). On `track` the analysis too: the file's stamp, the features'
@@ -328,11 +334,11 @@ the library has none of theirs), found by MusicBrainz id, else Deezer
 id, else name. The window keeps what it needs in memory; the file is
 for the record and for `sqlite3`.
 
-`s` (or the radio button: on an album's and an artist's page, on
+`s` (or the radio button: on an album's, an artist's and a playlist's page, on
 their cards, right of the play button, and at the end of every track
 row the library has) starts a radio from what is
 selected, and brings up the queue over the page, as Tab does: a track, the seed and nothing more, nearest to itself and so
-likely to come first, about four times in ten, or not; an album, a
+likely to come first, about four times in ten, or not; an album or a playlist, a
 journey between its two most different tracks, none of its tracks
 forced in; an artist, fifteen of whose tracks open it at random, and
 whose tracks are all it plays. Then
@@ -375,8 +381,8 @@ moving, through-composed, a crescendo, faster and denser, the pulse
 put to the test), the climax (the tension sustained, the fastest and
 thickest pulse, a motif hammered, an arch that resolves), the new
 equilibrium (home: on a key, the repetition of the start, slower and
-sparser, steady, a fade). An album's radio is not the arc but a
-journey: the album's two tracks farthest apart on the levers are its
+sparser, steady, a fade). An album's radio, and a playlist's, is not the arc but a
+journey: its two tracks farthest apart on the levers are its
 ends, and the target goes from the one to the other over fifteen
 tracks and back over the next fifteen, on the levers only, the world
 the album's; where the arc starts over with every fifteen, the
@@ -394,14 +400,14 @@ say in it beyond their turn: the track's analysis decides. A track
 not shaped yet (an older version) sits at zero on every shape, in
 the rank where zero falls. And the voice is a ceiling:
 no track more vocal than where the radio started (a track's voice; the
-most vocal track of an album or an artist), so a radio from an
+most vocal track of an album, a playlist or an artist), so a radio from an
 instrumental plays instrumentals only, one from a song anything; a
 track not heard yet passes. The
 queue shows the radio's glyph and where it started; rows taken out of
 it leave it the radio, anything loaded or appended ends it; it
-survives a restart with the queue. While a radio plays mpd crossfades
-its tracks, a second by default (`[radio] crossfade`, 0 for
-none), and goes back to what it had when the radio ends. Save, in the queue's head while the
+survives a restart with the queue. While a radio or a playlist plays mpd
+crossfades its tracks, a second by default (`[radio] crossfade`, 0 for
+none), and goes back to what it had when they end. Save, in the queue's head while the
 radio plays (and `save_queue` in Ctrl+K's list), writes the queue so
 far as a playlist, named "Radio" and what it started from (the
 track's title, the album's, the artist's; the name can be changed
@@ -415,11 +421,13 @@ loads it whole and points there; Add to queue appends and drops the
 pointer: the queue is then put together by hand, shown as the queue
 itself (its glyph, its name), until `save_queue` (in Ctrl+K's list)
 writes it as an m3u8 file in `Playlists` and points there. The player
-bar's album button shows what the queue plays, an album, a playlist or
-the queue, by its glyph, and opens it. Queue is the fourth tab (`4`); there every row
+bar's second button shows the playlist or the radio the queue plays,
+by its glyph, and opens it; `go_to_playing` opens whatever plays,
+the album too. Queue is the fourth tab (`4`); there every row
 can be moved up and down (L and K on the selected one) and removed (d or
 Delete); the shuffle of the playlist it plays comes first in its head,
-then Clear, which empties the queue. Other clients change the queue
+then Clear, which empties the queue, then Play, last on a playlist's
+head too, which plays the selected row. Other clients change the queue
 too: when it no longer matches the list pointed to, the pointer drops. On a track (a
 selected row of an album or playlist page) `a` adds it to a playlist,
 picked or created by name; a playlist the master points to grows in

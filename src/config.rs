@@ -203,7 +203,7 @@ pub struct Config {
     pub music: PathBuf,
     pub playlists: PathBuf,
     pub threads: usize,
-    /// The crossfade between a radio's tracks; nothing for the queue otherwise.
+    /// The crossfade between a radio's or a playlist's tracks; nothing for the queue otherwise.
     pub crossfade: Duration,
     keys: HashMap<Shortcut, Vec<Chord>>,
     labels: HashMap<Shortcut, String>,

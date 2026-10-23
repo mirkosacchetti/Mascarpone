@@ -22,6 +22,11 @@ pub struct Master {
     pub uris: Vec<String>,
 }
 
+/// A playlist's name: its file's, without the extension.
+fn stem(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 fn state_dir() -> PathBuf {
     crate::dirs::state().join("mascarpone")
 }
@@ -95,7 +100,7 @@ impl Master {
                 Some(a) => (format!("{}  {}", glyphs::ALBUM, a.title), a.artist.clone()),
                 None => ("Queue".into(), glyphs::ALBUM.into()),
             },
-            Source::Playlist { path } => (format!("{}  {}", glyphs::PLAYLIST, path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()), String::new()),
+            Source::Playlist { path } => (format!("{}  {}", glyphs::PLAYLIST, stem(path)), String::new()),
             Source::Anon => (format!("{}  Queue", glyphs::QUEUE), String::new()),
             Source::Radio { seed } => {
                 let (name, detail) = match seed {
@@ -108,6 +113,7 @@ impl Master {
                         None => (String::new(), String::new()),
                     },
                     Seed::Artist(name) => (name.clone(), String::new()),
+                    Seed::Playlist(path) => (stem(path), String::new()),
                 };
                 (format!("{}  {name}", glyphs::RADIO), detail)
             }
@@ -120,6 +126,7 @@ impl Master {
             Seed::Track(uri) => library.place(uri).map(|(a, t)| library.albums[a].tracks[t].title.clone())?,
             Seed::Album(key) => library.album_by_key(key)?.title.clone(),
             Seed::Artist(name) => name.clone(),
+            Seed::Playlist(path) => stem(path),
         };
         Some(format!("Radio {name}"))
     }

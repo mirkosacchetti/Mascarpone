@@ -8,6 +8,7 @@
 //! database (that is the archive's).
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,7 @@ pub enum Seed {
     Track(String),
     Album(String),
     Artist(String),
+    Playlist(PathBuf),
 }
 
 /// The axes a track is on, the measures folded by what they measure
@@ -206,12 +208,12 @@ fn mean(xs: &[Axis]) -> Axis {
     m
 }
 
-/// What a radio opens with before its arcs: nothing for a track or an
-/// album, which are only the seed (the track is nearest to itself and
+/// What a radio opens with before its arcs: nothing for a track, an
+/// album or a playlist, which are only the seed (the track is nearest to itself and
 /// may well come first, or not), a handful of an artist's.
 pub fn opening(library: &Library, seed: &Seed) -> Vec<String> {
     match seed {
-        Seed::Track(_) | Seed::Album(_) => Vec::new(),
+        Seed::Track(_) | Seed::Album(_) | Seed::Playlist(_) => Vec::new(),
         Seed::Artist(name) => {
             let mut theirs: Vec<String> = own_tracks(library, name).into_iter().filter(|u| fits(library, u)).collect();
             fastrand::shuffle(&mut theirs);
@@ -226,6 +228,7 @@ fn seed_uris(library: &Library, seed: &Seed) -> Vec<String> {
         Seed::Track(uri) => vec![uri.clone()],
         Seed::Album(key) => library.album_by_key(key).map(|a| a.uris()).unwrap_or_default(),
         Seed::Artist(name) => own_tracks(library, name),
+        Seed::Playlist(path) => library.playlists().iter().find(|p| p.path == *path).map(|p| p.uris()).unwrap_or_default(),
     }
 }
 
@@ -361,7 +364,7 @@ pub fn path(library: &Library, vectors: &Vectors, seed: &Seed, queue: &[String],
     }
     let centre = mean(&seeds);
     let journey = match seed {
-        Seed::Album(_) => farthest(&seeds),
+        Seed::Album(_) | Seed::Playlist(_) => farthest(&seeds),
         _ => None,
     };
     let pool = match seed {
@@ -675,7 +678,7 @@ mod tests {
         assert!(!seeds.is_empty(), "no seed: {seed:?}");
         let centre = mean(&seeds);
         let journey = match seed {
-            Seed::Album(_) => farthest(&seeds),
+            Seed::Album(_) | Seed::Playlist(_) => farthest(&seeds),
             _ => None,
         };
         if let Ok(runs) = std::env::var("ARC_RUNS").map(|r| r.parse::<usize>().unwrap()) {

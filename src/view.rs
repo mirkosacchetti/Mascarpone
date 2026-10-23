@@ -26,7 +26,6 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 
     draw_header(app, ui, header);
     crate::player::draw(app, ui, R::new(0.0, ui.h - player, ui.w, player));
-    snack(app, ui, content);
 
     if let Some(mut m) = app.modal.take() {
         ui.blocked = false;
@@ -97,19 +96,15 @@ fn draw_header(app: &App, ui: &mut Ui, h: f32) {
     if app.analyzing.is_some() || app.linking.is_some() {
         let g = ui.line(Style::Subtitle);
         ui.icon(glyphs::RADIO, R::new(right - g, ly, g, g), 1.0, ui::FG);
+        right -= g + rem(1.5);
     }
-}
-
-fn snack(app: &App, ui: &mut Ui, content: R) {
-    let Some((text, until)) = &app.snack else { return };
-    if let Some(until) = until {
-        ui.wake(until.saturating_duration_since(Instant::now()).as_secs_f64());
+    // the app's messages, on the same line, left of the counts
+    if let Some((text, until)) = &app.message {
+        if let Some(until) = until {
+            ui.wake(until.saturating_duration_since(Instant::now()).as_secs_f64());
+        }
+        ui.text_right(Style::Subtitle, text, right, ly);
     }
-    let w = ui.width(Style::Label, text);
-    let (px, py) = (rem(1.25), rem(0.75));
-    let r = R::new(((ui.w - w) / 2.0 - px).round(), content.y + rem(1.0), w + 2.0 * px, ui.line(Style::Label) + 2.0 * py);
-    ui.rect(r, ui::SHADE);
-    ui.text(Style::Label, text, r.x + px, r.y + py, w + 1.0);
 }
 
 fn root(app: &mut App, ui: &mut Ui, area: R) {
@@ -374,8 +369,14 @@ fn playlists(app: &App, ui: &mut Ui, grid: &mut Grid, library: &Arc<Library>, ar
                 None => ui.placeholder(glyphs::ALBUM, r, false),
             }
         }
-        if (over || i == grid.selected) && p.missing() < p.entries.len() && play_button(ui, R::new(mx, cell.y + pad, mosaic, mosaic)) {
-            app.act(Action::Load { source: Source::Playlist { path: p.path.clone() }, uris: p.uris(), start: 0 });
+        if (over || i == grid.selected) && p.missing() < p.entries.len() {
+            let picture = R::new(mx, cell.y + pad, mosaic, mosaic);
+            if play_button(ui, picture) {
+                app.act(Action::Load { source: Source::Playlist { path: p.path.clone() }, uris: p.uris(), start: 0 });
+            }
+            if card_button(ui, picture, 1, glyphs::RADIO, app.vectors.is_some()) {
+                app.act(Action::Radio(crate::radio::Seed::Playlist(p.path.clone())));
+            }
         }
         if ui.click(cell) {
             grid.selected = i;

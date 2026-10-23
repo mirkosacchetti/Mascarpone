@@ -153,6 +153,7 @@ impl Tracks {
         t.uris = playlist.uris();
         t.shuffle = Some((playlist.path.clone(), crate::master::shuffled(&playlist.path)));
         t.delete = Some((playlist.path.clone(), playlist.name.clone()));
+        t.seed = Some(Seed::Playlist(playlist.path.clone()));
         t
     }
 
@@ -397,7 +398,7 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
     let gap = rem(0.5);
     let n = match t.plays {
         Plays::Load(_) => 2 + shuffle.is_some() as usize + t.seed.is_some() as usize,
-        Plays::Queue => 1 + shuffle.is_some() as usize + t.save.is_some() as usize,
+        Plays::Queue => 2 + shuffle.is_some() as usize + t.save.is_some() as usize,
     };
     let (mut bx, fy) = (x0 + cw - (n as f32 * button + (n - 1) as f32 * gap), head.bottom() - button);
     let mut next = |ui: &mut Ui, glyph: &str, look: Look, sensitive: bool| {
@@ -405,10 +406,13 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
         bx += button + gap;
         ui.square(x, fy, glyph, look, sensitive)
     };
+    // Play: first on an album's head, last on a playlist's and the queue's
+    let here = t.selection().is_some_and(|(_, uri)| current == Some(uri));
+    let play_glyph = if here && playing { glyphs::PAUSE } else { glyphs::PLAY };
     match t.plays {
-        Plays::Load(_) => {
-            let here = t.selection().is_some_and(|(_, uri)| current == Some(uri));
-            if next(ui, if here && playing { glyphs::PAUSE } else { glyphs::PLAY }, Look::Suggested, any) {
+        Plays::Load(ref source) => {
+            let playlist = matches!(source, Source::Playlist { .. });
+            if !playlist && next(ui, play_glyph, Look::Suggested, any) {
                 t.play_selected(app);
             }
             if let Some((path, on, look)) = shuffle {
@@ -423,6 +427,9 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
                 if next(ui, glyphs::RADIO, Look::Plain, app.vectors.is_some()) {
                     app.act(Action::Radio(seed.clone()));
                 }
+            }
+            if playlist && next(ui, play_glyph, Look::Suggested, any) {
+                t.play_selected(app);
             }
         }
         Plays::Queue => {
@@ -439,6 +446,9 @@ pub fn draw_tracks(app: &App, t: &mut Tracks, ui: &mut Ui, area: R) {
             if next(ui, glyphs::CLEAR, Look::Destructive, any) {
                 app.act(Action::QueueRow(None));
                 app.act(Action::Mpd(Command::Clear));
+            }
+            if next(ui, play_glyph, Look::Suggested, any) {
+                t.play_selected(app);
             }
         }
     }
